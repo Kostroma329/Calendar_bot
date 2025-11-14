@@ -1,5 +1,4 @@
-# parser.py
-import spacy
+# parser.py (БЕЗ SPACY)
 from datetime import datetime, timedelta
 import re
 from dateutil.parser import parse as dateutil_parse
@@ -8,13 +7,6 @@ import logging
 
 # Настройка логирования
 logger = logging.getLogger(__name__)
-
-# Загружаем русскую модель spaCy
-try:
-    nlp = spacy.load("ru_core_news_sm")
-except OSError:
-    logger.error("Модель ru_core_news_sm не найдена. Установите: python -m spacy download ru_core_news_sm")
-    raise
 
 # ТОЛЬКО ваши танцы
 DANCE_VARIANTS = {
@@ -243,24 +235,27 @@ def extract_datetime(text: str) -> Optional[datetime]:
         return None
 
 
-def extract_dances(doc) -> List[str]:
-    """Извлекает танцы из spaCy документа"""
+def extract_dances_simple(text: str) -> List[str]:
+    """Извлекает танцы из текста без spacy"""
     dances_found = set()
+    text_lower = text.lower()
 
-    # Поиск по точному совпадению
-    for token in doc:
-        token_lower = token.text.lower()
-        if token_lower in KNOWN_DANCES:
-            dances_found.add(KNOWN_DANCES[token_lower])
+    # Простой поиск по словам
+    words = re.findall(r'\b\w+\b', text_lower)
 
-    # Поиск по n-граммам для составных названий
-    for i in range(len(doc) - 1):
-        bigram = f"{doc[i].text.lower()} {doc[i + 1].text.lower()}"
+    # Поиск отдельных слов
+    for word in words:
+        if word in KNOWN_DANCES:
+            dances_found.add(KNOWN_DANCES[word])
+
+    # Поиск по 2-3 словам
+    for i in range(len(words) - 1):
+        bigram = f"{words[i]} {words[i + 1]}"
         if bigram in KNOWN_DANCES:
             dances_found.add(KNOWN_DANCES[bigram])
 
-    for i in range(len(doc) - 2):
-        trigram = f"{doc[i].text.lower()} {doc[i + 1].text.lower()} {doc[i + 2].text.lower()}"
+    for i in range(len(words) - 2):
+        trigram = f"{words[i]} {words[i + 1]} {words[i + 2]}"
         if trigram in KNOWN_DANCES:
             dances_found.add(KNOWN_DANCES[trigram])
 
@@ -345,19 +340,17 @@ def extract_location_improved(text: str) -> Optional[str]:
 
 def extract_with_spacy(text: str) -> Dict[str, Optional[str]]:
     """
-    Извлекает информацию о мероприятии из текста
+    Извлекает информацию о мероприятии из текста (теперь без spacy)
     """
     if not text or not text.strip():
         return {"datetime": None, "location": None, "dances": []}
 
     try:
-        doc = nlp(text.lower())
-
         # Извлекаем локации
         location = extract_location_improved(text)
 
-        # Извлекаем танцы
-        dances = extract_dances(doc)
+        # Извлекаем танцы (простая версия без spacy)
+        dances = extract_dances_simple(text)
 
         # Извлекаем дату и время
         dt = extract_datetime(text)
