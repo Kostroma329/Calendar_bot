@@ -397,13 +397,6 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     # Инициализация базы данных
     init_db()
-    # Способ 1: Явно отключить прокси
-    application = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .proxy_url(None)  # Отключаем прокси
-        .build()
-    )
 
     # Создаем Application
     application = Application.builder().token(BOT_TOKEN).build()
