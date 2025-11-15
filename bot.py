@@ -267,13 +267,17 @@ async def receive_dances(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def delete_event_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Проверяем, что это сообщение, а не что-то другое
+    if update.message is None:
+        return  # или логируем ошибку
+
     user_id = update.effective_user.id
     args = context.args
 
     if not args or not args[0].isdigit():
         await update.message.reply_text(
             "❌ Неверный формат.\nИспользуй: /delete N, где N — номер события.\n"
-            "Сначала посмотри список через кнопку «Мои мероприятия».",
+            "Сначала посмотри список через /events или кнопку «Мои мероприятия».",
             reply_markup=get_main_menu()
         )
         return
@@ -288,20 +292,13 @@ async def delete_event_command(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return
 
-    event_id = events[event_num - 1][0]
-    success = delete_event(event_id)
+    event_id = events[event_num - 1][0]  # id события
+    delete_event(event_id)
 
-    if success:
-        await update.message.reply_text(
-            f"✅ Событие №{event_num} удалено!",
-            reply_markup=get_main_menu()
-        )
-    else:
-        await update.message.reply_text(
-            f"❌ Ошибка при удалении события №{event_num}.",
-            reply_markup=get_main_menu()
-        )
-
+    await update.message.reply_text(
+        f"✅ Событие №{event_num} удалено!",
+        reply_markup=get_main_menu()
+    )
 
 async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда для отладки - показывает все события (только для админов)"""
@@ -443,3 +440,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
