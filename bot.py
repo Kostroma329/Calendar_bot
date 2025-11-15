@@ -435,9 +435,21 @@ def main():
     print("✅ Бот запущен с системой прав!")
     print(f"👑 Админы: {ADMIN_IDS}")
 
-    application.run_polling()
+    # Для Render - используем webhook
+    if os.getenv('RENDER'):
+        webhook_url = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/{BOT_TOKEN}"
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=int(os.getenv('PORT', 8443)),
+            url_path=BOT_TOKEN,
+            webhook_url=webhook_url
+        )
+    else:
+        # Для PythonAnywhere - polling
+        application.run_polling()
 
 
 if __name__ == "__main__":
     main()
+
 
