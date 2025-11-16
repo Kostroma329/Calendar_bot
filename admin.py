@@ -1,7 +1,7 @@
 # admin.py
 # Список ID администраторов
 ADMIN_IDS = {
-    481825464,  # Замените на ваш Telegram ID
+    481825464,  # Ваш ID
     # Можно добавить другие ID через запятую
 }
 
@@ -11,8 +11,20 @@ def is_admin(user_id: int) -> bool:
 
 def get_admin_commands() -> list:
     """Возвращает список команд для администраторов"""
-    return ['start', 'delete', 'debug', 'stats']
+    return ['start', 'delete', 'debug', 'stats', 'help']
 
 def get_user_commands() -> list:
     """Возвращает список команд для обычных пользователей"""
-    return ['start', 'delete']
+    return ['start', 'delete', 'help']
+
+def add_admin(user_id: int):
+    """Добавляет администратора"""
+    ADMIN_IDS.add(user_id)
+
+def remove_admin(user_id: int):
+    """Удаляет администратора"""
+    ADMIN_IDS.discard(user_id)
+
+def get_admin_ids() -> set:
+    """Возвращает список ID администраторов"""
+    return ADMIN_IDS.copy()
