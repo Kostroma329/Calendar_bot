@@ -2,7 +2,7 @@
 import logging
 import sqlite3
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, ContextTypes,
@@ -10,7 +10,7 @@ from telegram.ext import (
 )
 
 from config import BOT_TOKEN
-from database import init_db, add_event, get_upcoming_events, delete_event, get_today_events, get_all_events
+from database import init_db, add_event, get_upcoming_events, delete_event, get_today_events, get_all_events, get_events_for_notification
 from parser import extract_with_spacy
 from admin import is_admin, get_admin_commands, get_user_commands, ADMIN_IDS
 
@@ -27,17 +27,26 @@ AWAITING_CONFIRMATION, AWAITING_LOCATION, AWAITING_DANCES = 1, 2, 3
 # Временное хранилище
 user_data = {}
 
-
-def get_main_menu():
-    """Возвращает главное меню с кнопками"""
-    keyboard = [
-        [InlineKeyboardButton("➕ Добавить событие", callback_data="add_event")],
-        [InlineKeyboardButton("📅 Мои мероприятия", callback_data="show_events")],
-        [InlineKeyboardButton("🗑️ Удалить событие", callback_data="delete_event")],
-        [InlineKeyboardButton("🎯 Сегодня есть мероприятие?", callback_data="today")]
-    ]
+def get_main_menu(user_id: int):
+    """Возвращает главное меню с кнопками в зависимости от прав"""
+    if is_admin(user_id):
+        # Меню для администратора
+        keyboard = [
+            [InlineKeyboardButton("➕ Добавить событие", callback_data="add_event")],
+            [InlineKeyboardButton("📅 Мои мероприятия", callback_data="show_events")],
+            [InlineKeyboardButton("🗑️ Удалить событие", callback_data="delete_event")],
+            [InlineKeyboardButton("🎯 Сегодня есть мероприятие?", callback_data="today")],
+            [InlineKeyboardButton("👑 Админ-панель", callback_data="admin_panel")]
+        ]
+    else:
+        # Меню для обычного пользователя
+        keyboard = [
+            [InlineKeyboardButton("➕ Добавить событие", callback_data="add_event")],
+            [InlineKeyboardButton("📅 Мои мероприятия", callback_data="show_events")],
+            [InlineKeyboardButton("🗑️ Удалить событие", callback_data="delete_event")],
+            [InlineKeyboardButton("🎯 Сегодня есть мероприятие?", callback_data="today")]
+        ]
     return InlineKeyboardMarkup(keyboard)
-
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -50,8 +59,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     welcome_text += "Выбери действие или отправь описание мероприятия:"
 
-    await update.message.reply_text(welcome_text, reply_markup=get_main_menu())
-
+    await update.message.reply_text(welcome_text, reply_markup=get_main_menu(user_id))
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -60,7 +68,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "add_event":
         await query.edit_message_text("Отправь описание мероприятия:\n\n"
-                                      "Пример: *«Завтра в 19:00 в Троицком танцуем вальс»*", parse_mode="Markdown")
+                                      "Пример: *«Завтра в 19:00 в Троицком танцуем вальс»*",
+                                      parse_mode="Markdown",
+                                      reply_markup=get_main_menu(user_id))
         return ConversationHandler.END
 
     elif query.data == "show_events":
@@ -75,14 +85,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 loc = ev[2] or "не указано"
                 dances = ev[3] or "не указаны"
                 msg += f"• {dt.strftime('%d.%m %H:%M')} — {loc} | {dances}\n"
-        await query.edit_message_text(msg, reply_markup=get_main_menu())
+        await query.edit_message_text(msg, reply_markup=get_main_menu(user_id))
         return ConversationHandler.END
 
     elif query.data == "delete_event":
         events = get_upcoming_events(user_id)
         if not events:
             msg = "У тебя нет мероприятий для удаления."
-            await query.edit_message_text(msg, reply_markup=get_main_menu())
+            await query.edit_message_text(msg, reply_markup=get_main_menu(user_id))
             return ConversationHandler.END
 
         msg = "📌 Выбери событие для удаления:\n\n"
@@ -94,7 +104,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         msg += "\n\nОтправь команду /delete N, где N — номер события."
 
-        await query.edit_message_text(msg, reply_markup=get_main_menu())
+        await query.edit_message_text(msg, reply_markup=get_main_menu(user_id))
         return ConversationHandler.END
 
     elif query.data == "today":
@@ -109,9 +119,49 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 dances = ev[3] or "не указаны"
                 msg += f"• {dt.strftime('%H:%M')} — {loc} | {dances}\n"
 
-        await query.edit_message_text(msg, reply_markup=get_main_menu())
+        await query.edit_message_text(msg, reply_markup=get_main_menu(user_id))
         return ConversationHandler.END
 
+    elif query.data == "admin_panel":
+        await admin_panel(update, context)
+        return
+
+    elif query.data == "stats_panel":
+        if not is_admin(user_id):
+            await query.edit_message_text("❌ У вас нет прав для выполнения этой команды.", reply_markup=get_main_menu(user_id))
+            return
+        await stats_command(update, context)
+        return
+
+    elif query.data == "debug_panel":
+        if not is_admin(user_id):
+            await query.edit_message_text("❌ У вас нет прав для выполнения этой команды.", reply_markup=get_main_menu(user_id))
+            return
+        await debug_command(update, context)
+        return
+
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Админ-панель (только для админов)"""
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+
+    if not is_admin(user_id):
+        await query.edit_message_text("❌ У вас нет прав для доступа к админ-панели.", reply_markup=get_main_menu(user_id))
+        return
+
+    keyboard = [
+        [InlineKeyboardButton("📊 Статистика", callback_data="stats_panel")],
+        [InlineKeyboardButton("🔧 Отладка БД", callback_data="debug_panel")],
+        [InlineKeyboardButton("◀️ Назад", callback_data="show_events")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await query.edit_message_text(
+        "👑 Админ-панель:\n\n"
+        "Выберите действие:",
+        reply_markup=reply_markup
+    )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
@@ -125,7 +175,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not dt:
         await update.message.reply_text("❌ Не удалось определить дату. Попробуй: *«завтра в 19:00»*",
-                                        parse_mode="Markdown")
+                                        parse_mode="Markdown",
+                                        reply_markup=get_main_menu(user_id))
         return ConversationHandler.END
 
     # Сохраняем во временное хранилище
@@ -159,14 +210,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return AWAITING_CONFIRMATION
 
-
 async def confirm_or_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
 
     if user_id not in user_data:
-        await query.edit_message_text("❌ Ошибка. Начни сначала.", reply_markup=get_main_menu())
+        await query.edit_message_text("❌ Ошибка. Начни сначала.", reply_markup=get_main_menu(user_id))
         return ConversationHandler.END
 
     data = user_data[user_id]
@@ -174,9 +224,19 @@ async def confirm_or_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "confirm":
         success = add_event(user_id, data["datetime"], data["location"], data["dances"], data["raw_text"])
         if success:
-            await query.edit_message_text("✅ Отлично! Событие сохранено в календаре.", reply_markup=get_main_menu())
+            # Планируем уведомление за день до события
+            notification_time = data["datetime"] - timedelta(days=1)
+            if notification_time > datetime.now():
+                context.job_queue.run_once(
+                    send_notification,
+                    when=notification_time,
+                    data=user_id,
+                    name=f"reminder_{user_id}_{data['datetime'].isoformat()}"
+                )
+
+            await query.edit_message_text("✅ Отлично! Событие сохранено в календаре.", reply_markup=get_main_menu(user_id))
         else:
-            await query.edit_message_text("❌ Ошибка при сохранении события.", reply_markup=get_main_menu())
+            await query.edit_message_text("❌ Ошибка при сохранении события.", reply_markup=get_main_menu(user_id))
         del user_data[user_id]
         return ConversationHandler.END
 
@@ -188,11 +248,39 @@ async def confirm_or_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Напиши правильные танцы через запятую:")
         return AWAITING_DANCES
 
+async def send_notification(context: ContextTypes.DEFAULT_TYPE):
+    """Отправляет уведомление за день до мероприятия"""
+    user_id = context.job.data
+
+    # Получаем события пользователя, которые начнутся через день
+    target_date = datetime.now() + timedelta(days=1)
+    events = get_events_for_notification(user_id, target_date)
+
+    if events:
+        for event in events:
+            dt = datetime.fromisoformat(event[1])
+            loc = event[2] or "не указано"
+            dances = event[3] or "не указаны"
+
+            message = (
+                "🔔 Напоминание!\n\n"
+                f"Завтра у тебя мероприятие:\n"
+                f"📅 {dt.strftime('%d.%m в %H:%M')}\n"
+                f"📍 {loc}\n"
+                f"💃 {dances}\n\n"
+                f"Не забудь подготовиться! 💃🕺"
+            )
+
+            try:
+                await context.bot.send_message(chat_id=user_id, text=message)
+                logger.info(f"Уведомление отправлено пользователю {user_id}")
+            except Exception as e:
+                logger.error(f"Ошибка отправки уведомления пользователю {user_id}: {e}")
 
 async def receive_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id not in user_data:
-        await update.message.reply_text("❌ Ошибка. Начни с команды /start.", reply_markup=get_main_menu())
+        await update.message.reply_text("❌ Ошибка. Начни с команды /start.", reply_markup=get_main_menu(user_id))
         return ConversationHandler.END
 
     new_location = update.message.text.strip()
@@ -226,11 +314,10 @@ async def receive_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return AWAITING_CONFIRMATION
 
-
 async def receive_dances(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id not in user_data:
-        await update.message.reply_text("❌ Ошибка. Начни с команды /start.", reply_markup=get_main_menu())
+        await update.message.reply_text("❌ Ошибка. Начни с команды /start.", reply_markup=get_main_menu(user_id))
         return ConversationHandler.END
 
     dances_input = update.message.text.strip()
@@ -265,20 +352,15 @@ async def receive_dances(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return AWAITING_CONFIRMATION
 
-
 async def delete_event_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Проверяем, что это сообщение, а не что-то другое
-    if update.message is None:
-        return  # или логируем ошибку
-
     user_id = update.effective_user.id
     args = context.args
 
     if not args or not args[0].isdigit():
         await update.message.reply_text(
             "❌ Неверный формат.\nИспользуй: /delete N, где N — номер события.\n"
-            "Сначала посмотри список через /events или кнопку «Мои мероприятия».",
-            reply_markup=get_main_menu()
+            "Сначала посмотри список через кнопку «Мои мероприятия».",
+            reply_markup=get_main_menu(user_id)
         )
         return
 
@@ -288,30 +370,36 @@ async def delete_event_command(update: Update, context: ContextTypes.DEFAULT_TYP
     if event_num < 1 or event_num > len(events):
         await update.message.reply_text(
             f"❌ Нет события с номером {event_num}.",
-            reply_markup=get_main_menu()
+            reply_markup=get_main_menu(user_id)
         )
         return
 
-    event_id = events[event_num - 1][0]  # id события
-    delete_event(event_id)
+    event_id = events[event_num - 1][0]
+    success = delete_event(event_id)
 
-    await update.message.reply_text(
-        f"✅ Событие №{event_num} удалено!",
-        reply_markup=get_main_menu()
-    )
+    if success:
+        await update.message.reply_text(
+            f"✅ Событие №{event_num} удалено!",
+            reply_markup=get_main_menu(user_id)
+        )
+    else:
+        await update.message.reply_text(
+            f"❌ Ошибка при удалении события №{event_num}.",
+            reply_markup=get_main_menu(user_id)
+        )
 
 async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда для отладки - показывает все события (только для админов)"""
     user_id = update.effective_user.id
 
     if not is_admin(user_id):
-        await update.message.reply_text("❌ У вас нет прав для выполнения этой команды.")
+        await update.message.reply_text("❌ У вас нет прав для выполнения этой команды.", reply_markup=get_main_menu(user_id))
         return
 
     events = get_all_events(user_id)
 
     if not events:
-        await update.message.reply_text("В базе данных нет событий.")
+        await update.message.reply_text("В базе данных нет событий.", reply_markup=get_main_menu(user_id))
     else:
         msg = "🔧 Все события в БД:\n\n"
         for ev in events:
@@ -321,15 +409,14 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             is_past = "⏰" if dt < datetime.now() else "✅"
             msg += f"{is_past} {dt.strftime('%d.%m %H:%M')} — {loc} | {dances}\n"
 
-        await update.message.reply_text(msg)
-
+        await update.message.reply_text(msg, reply_markup=get_main_menu(user_id))
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Статистика бота (только для админов)"""
     user_id = update.effective_user.id
 
     if not is_admin(user_id):
-        await update.message.reply_text("❌ У вас нет прав для выполнения этой команды.")
+        await update.message.reply_text("❌ У вас нет прав для выполнения этой команды.", reply_markup=get_main_menu(user_id))
         return
 
     try:
@@ -357,11 +444,10 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• Админов: {len(ADMIN_IDS)}\n"
         )
 
-        await update.message.reply_text(stats_msg)
+        await update.message.reply_text(stats_msg, reply_markup=get_main_menu(user_id))
 
     except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка при получении статистики: {e}")
-
+        await update.message.reply_text(f"❌ Ошибка при получении статистики: {e}", reply_markup=get_main_menu(user_id))
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показывает доступные команды"""
@@ -383,15 +469,19 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Или используй кнопки меню ниже 👇"
     )
 
-    await update.message.reply_text(help_text, reply_markup=get_main_menu())
+    await update.message.reply_text(help_text, reply_markup=get_main_menu(user_id))
 
+async def get_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда для получения своего ID"""
+    user_id = update.effective_user.id
+    await update.message.reply_text(f"Ваш ID: `{user_id}`", parse_mode="Markdown", reply_markup=get_main_menu(user_id))
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик ошибок"""
     logger.error(f"Ошибка: {context.error}", exc_info=context.error)
 
-
 def main():
+    """Основная функция"""
     # Инициализация базы данных
     init_db()
 
@@ -416,7 +506,8 @@ def main():
         },
         fallbacks=[CommandHandler("start", start)],
         name="conversation",
-        persistent=False
+        persistent=False,
+        per_message=True
     )
 
     # Добавляем обработчики команд
@@ -426,30 +517,17 @@ def main():
     application.add_handler(CommandHandler("delete", delete_event_command))
     application.add_handler(CommandHandler("debug", debug_command))
     application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(CommandHandler("getid", get_id_command))
     application.add_handler(CallbackQueryHandler(button_handler))
 
     # Добавляем обработчик ошибок
     application.add_error_handler(error_handler)
 
-    # Запускаем бота
     print("✅ Бот запущен с системой прав!")
     print(f"👑 Админы: {ADMIN_IDS}")
 
-    # Для Render - используем webhook
-    if os.getenv('RENDER'):
-        webhook_url = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/{BOT_TOKEN}"
-        application.run_webhook(
-            listen="0.0.0.0",
-            port=int(os.getenv('PORT', 8443)),
-            url_path=BOT_TOKEN,
-            webhook_url=webhook_url
-        )
-    else:
-        # Для PythonAnywhere - polling
-        application.run_polling()
-
+    # Запускаем бота
+    application.run_polling()
 
 if __name__ == "__main__":
     main()
-
-
