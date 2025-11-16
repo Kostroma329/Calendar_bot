@@ -527,7 +527,15 @@ def main():
     print(f"👑 Админы: {ADMIN_IDS}")
 
     # Запускаем бота
-    application.run_polling()
+    if os.getenv('RENDER'):
+        # Webhook для Render
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=int(os.getenv('PORT', 8443)),
+            url_path=BOT_TOKEN,
+            webhook_url=f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/{BOT_TOKEN}"
+        )
 
 if __name__ == "__main__":
     main()
+
