@@ -24,9 +24,6 @@ logger = logging.getLogger(__name__)
 # Состояния
 AWAITING_CONFIRMATION, AWAITING_LOCATION, AWAITING_DANCES = 1, 2, 3
 
-# Временное хранилище
-user_data = {}
-
 
 def get_main_menu(user_id=None):
     """Возвращает главное меню с кнопками в зависимости от прав пользователя"""
@@ -153,7 +150,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return ConversationHandler.END
             
         try:
-            conn = sqlite3.connect("events.db")
+            conn = sqlite3.connect("events.db", check_same_thread=False)
             cursor = conn.cursor()
 
             # Общая статистика
@@ -199,8 +196,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                         parse_mode="Markdown")
         return ConversationHandler.END
 
-    # Сохраняем во временное хранилище
-    user_data[user_id] = {
+    # Сохраняем в context.user_data (сохраняется между перезапусками)
+    context.user_data["event_data"] = {
         "datetime": dt,
         "location": location,
         "dances": dances,
@@ -236,11 +233,11 @@ async def confirm_or_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     user_id = update.effective_user.id
 
-    if user_id not in user_data:
+    if "event_data" not in context.user_data:
         await query.edit_message_text("❌ Ошибка. Начни сначала.", reply_markup=get_main_menu(user_id))
         return ConversationHandler.END
 
-    data = user_data[user_id]
+    data = context.user_data["event_data"]
 
     if query.data == "confirm":
         success = add_event(user_id, data["datetime"], data["location"], data["dances"], data["raw_text"])
@@ -248,7 +245,8 @@ async def confirm_or_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("✅ Отлично! Событие сохранено в календаре.", reply_markup=get_main_menu(user_id))
         else:
             await query.edit_message_text("❌ Ошибка при сохранении события.", reply_markup=get_main_menu(user_id))
-        del user_data[user_id]
+        # Очищаем временные данные
+        context.user_data.pop("event_data", None)
         return ConversationHandler.END
 
     elif query.data == "edit_location":
@@ -262,17 +260,17 @@ async def confirm_or_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def receive_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if user_id not in user_data:
+    if "event_data" not in context.user_data:
         await update.message.reply_text("❌ Ошибка. Начни с команды /start.", reply_markup=get_main_menu(user_id))
         return ConversationHandler.END
 
     new_location = update.message.text.strip()
 
-    # Обновляем данные
-    user_data[user_id]["location"] = new_location
+    # Обновляем данные в context.user_data
+    context.user_data["event_data"]["location"] = new_location
 
     # Показываем обновленные данные для подтверждения
-    data = user_data[user_id]
+    data = context.user_data["event_data"]
 
     keyboard = [
         [
@@ -300,18 +298,18 @@ async def receive_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def receive_dances(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if user_id not in user_data:
+    if "event_data" not in context.user_data:
         await update.message.reply_text("❌ Ошибка. Начни с команды /start.", reply_markup=get_main_menu(user_id))
         return ConversationHandler.END
 
     dances_input = update.message.text.strip()
     dances = [d.strip() for d in dances_input.split(",") if d.strip()]
 
-    # Обновляем данные
-    user_data[user_id]["dances"] = dances
+    # Обновляем данные в context.user_data
+    context.user_data["event_data"]["dances"] = dances
 
     # Показываем обновленные данные для подтверждения
-    data = user_data[user_id]
+    data = context.user_data["event_data"]
 
     keyboard = [
         [
@@ -371,6 +369,7 @@ async def delete_event_command(update: Update, context: ContextTypes.DEFAULT_TYP
         reply_markup=get_main_menu(user_id)
     )
 
+
 async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда для отладки - показывает все события (только для админов)"""
     user_id = update.effective_user.id
@@ -404,7 +403,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        conn = sqlite3.connect("events.db")
+        conn = sqlite3.connect("events.db", check_same_thread=False)
         cursor = conn.cursor()
 
         # Общая статистика
