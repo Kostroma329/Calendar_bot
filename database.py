@@ -223,7 +223,59 @@ def get_all_events(user_id=None):
     except Exception as e:
         logger.error(f"❌ Ошибка при получении событий: {e}")
         return []
+def get_all_users():
+    """Получение списка всех уникальных пользователей"""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        is_postgresql = os.getenv('RENDER') and PSYCOPG2_AVAILABLE
+        
+        if is_postgresql:
+            cursor.execute('SELECT DISTINCT user_id FROM events')
+        else:
+            cursor.execute('SELECT DISTINCT user_id FROM events')
+        
+        users = [row[0] for row in cursor.fetchall()]
+        conn.close()
+        return users
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка при получении списка пользователей: {e}")
+        return []
 
+
+def get_event_by_id(event_id):
+    """Получение события по ID"""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        is_postgresql = os.getenv('RENDER') and PSYCOPG2_AVAILABLE
+        
+        if is_postgresql:
+            cursor.execute('''
+                SELECT id, event_datetime, location, dances, user_id 
+                FROM events WHERE id = %s
+            ''', (event_id,))
+        else:
+            cursor.execute('''
+                SELECT id, event_datetime, location, dances, user_id 
+                FROM events WHERE id = ?
+            ''', (event_id,))
+        
+        event = cursor.fetchone()
+        conn.close()
+        
+        if event and is_postgresql:
+            event = (event[0], event[1].isoformat(), event[2], event[3], event[4])
+        
+        return event
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка при получении события по ID: {e}")
+        return None
+        
 def delete_event(event_id):
     """Удаление события по ID"""
     try:
@@ -307,3 +359,4 @@ def event_exists_for_any_user(datetime, location, dances):
     except Exception as e:
         logger.error(f"❌ Ошибка при проверке существования события: {e}")
         return False
+
