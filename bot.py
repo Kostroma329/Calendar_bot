@@ -619,36 +619,20 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
-    # Регистрируем обработчики завершения
+    # Регистрируем обработчики завершения (оставляем на всякий случай)
     atexit.register(backup_on_exit)
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
     # 1. Сначала пытаемся восстановить данные
     print("🔄 Восстановление из резервной копии...")
-    restore_success = restore_events()
-    
-    if restore_success:
-        print("✅ Данные восстановлены")
-    else:
-        print("ℹ️  Резервной копии нет")
+    restore_events()
     
     # 2. Инициализируем базу
     init_db()
     
-    # 3. Создаем начальную резервную копию (если база не пустая)
-    try:
-        conn = sqlite3.connect("events.db", check_same_thread=False)
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM events")
-        events_count = cursor.fetchone()[0]
-        conn.close()
-    except:
-        events_count = 0
-        
-    if events_count > 0:
-        print(f"💾 Создание резервной копии ({events_count} событий)...")
-        backup_events()
+    # 3. Периодический бэкап остается для подстраховки
+    print("💾 Система автоматического резервного копирования активирована")
 
     # Создаем Application с JobQueue
     application = Application.builder().token(BOT_TOKEN).build()
@@ -730,5 +714,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
