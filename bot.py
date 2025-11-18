@@ -546,12 +546,19 @@ def main():
     # Инициализация базы данных
     init_db()
 
-    # Создаем Application
+    # Создаем Application с JobQueue
     application = Application.builder().token(BOT_TOKEN).build()
 
     # Добавляем job для напоминаний (проверка каждые 30 минут)
     job_queue = application.job_queue
-    job_queue.run_repeating(send_daily_reminders, interval=1800, first=10)  # 1800 сек = 30 минут
+    
+    # Проверяем, что JobQueue доступен
+    if job_queue:
+        job_queue.run_repeating(send_daily_reminders, interval=1800, first=10)  # 1800 сек = 30 минут
+        print("🔔 Система напоминаний активирована")
+    else:
+        print("⚠️  JobQueue недоступен. Напоминания отключены.")
+        print("💡 Установите: pip install 'python-telegram-bot[job-queue]'")
 
     # Обработчик диалога
     conv_handler = ConversationHandler(
@@ -595,7 +602,6 @@ def main():
     # Запускаем бота
     print("✅ Бот запущен с системой прав!")
     print(f"👑 Админы: {ADMIN_IDS}")
-    print("🔔 Система напоминаний активирована")
     print("🛡️  Защита от дубликатов включена")
 
     # Для Render - используем webhook
