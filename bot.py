@@ -332,7 +332,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                               reply_markup=get_main_menu(user_id))
             return ConversationHandler.END
 
-                elif query.data == "broadcast":
+        elif query.data == "broadcast":
             # Только для админов
             if not is_admin(user_id):
                 await query.edit_message_text("❌ У вас нет прав для рассылки.", 
@@ -1354,5 +1354,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
