@@ -11,7 +11,8 @@ from telegram.ext import (
 )
 
 from config import BOT_TOKEN
-from database import init_db, add_event, get_upcoming_events, delete_event, get_today_events, get_all_events, event_exists
+from database import init_db, add_event, delete_event, event_exists
+from database import get_upcoming_events_all, get_today_events_all, get_all_events
 from parser import extract_with_spacy
 from admin import is_admin, get_admin_commands, get_user_commands, ADMIN_IDS
 
@@ -86,23 +87,20 @@ async def send_daily_reminders(context: ContextTypes.DEFAULT_TYPE):
 
 
 def get_main_menu(user_id=None):
-    """Возвращает главное меню с кнопками в зависимости от прав пользователя"""
+    """Возвращает главное меню с кнопками"""
+    # Одинаковое меню для всех пользователей
+    keyboard = [
+        [InlineKeyboardButton("➕ Добавить событие", callback_data="add_event")],
+        [InlineKeyboardButton("📅 Все мероприятия", callback_data="show_events")],
+        [InlineKeyboardButton("🎯 Сегодня есть мероприятие?", callback_data="today")]
+    ]
+    
+    # Только админы видят дополнительные кнопки
     if user_id and is_admin(user_id):
-        # Меню для администратора
-        keyboard = [
-            [InlineKeyboardButton("➕ Добавить событие", callback_data="add_event")],
-            [InlineKeyboardButton("📅 Мои мероприятия", callback_data="show_events")],
-            [InlineKeyboardButton("🗑️ Удалить событие", callback_data="delete_event")],
-            [InlineKeyboardButton("🎯 Сегодня есть мероприятие?", callback_data="today")],
-        ]
-    else:
-        # Меню для обычного пользователя
-        keyboard = [
-            [InlineKeyboardButton("➕ Добавить событие", callback_data="add_event")],
-            [InlineKeyboardButton("📅 Мои мероприятия", callback_data="show_events")],
-            [InlineKeyboardButton("🗑️ Удалить событие", callback_data="delete_event")],
-            [InlineKeyboardButton("🎯 Сегодня есть мероприятие?", callback_data="today")]
-        ]
+        keyboard.extend([
+            [InlineKeyboardButton("🗑️ Удалить событие", callback_data="delete_event")]
+        ])
+    
     return InlineKeyboardMarkup(keyboard)
 
 
@@ -133,34 +131,48 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return ConversationHandler.END
 
         elif query.data == "show_events":
-            events = get_upcoming_events(user_id)
+            # Показываем ВСЕ события всем пользователям
+            events = get_upcoming_events_all()
 
             if not events:
-                msg = "У тебя пока нет запланированных мероприятий."
+                msg = "Пока нет запланированных мероприятий."
             else:
-                msg = "📌 Твои ближайшие мероприятия:\n\n"
+                msg = "📅 Все ближайшие мероприятия:\n\n"
                 for ev in events:
                     dt = datetime.fromisoformat(ev[1])
                     loc = ev[2] or "не указано"
                     dances = ev[3] or "не указаны"
-                    msg += f"• {dt.strftime('%d.%m %H:%M')} — {loc} | {dances}\n"
+                    # Для админов показываем ID пользователя, для обычных - просто событие
+                    if is_admin(user_id):
+                        user_info = f"(👤 {ev[4]})"
+                    else:
+                        user_info = ""
+                    msg += f"• {dt.strftime('%d.%m %H:%M')} — {loc} | {dances} {user_info}\n"
             
             await query.edit_message_text(msg, reply_markup=get_main_menu(user_id))
             return ConversationHandler.END
 
         elif query.data == "delete_event":
-            events = get_upcoming_events(user_id)
+            # Только для админов
+            if not is_admin(user_id):
+                await query.edit_message_text("❌ У вас нет прав для удаления событий.", 
+                                              reply_markup=get_main_menu(user_id))
+                return ConversationHandler.END
+            
+            events = get_upcoming_events_all()  # Все события
+
             if not events:
-                msg = "У тебя нет мероприятий для удаления."
+                msg = "Нет мероприятий для удаления."
                 await query.edit_message_text(msg, reply_markup=get_main_menu(user_id))
                 return ConversationHandler.END
 
-            msg = "📌 Выбери событие для удаления:\n\n"
+            msg = "🗑️ Выбери событие для удаления:\n\n"
             for i, ev in enumerate(events, 1):
                 dt = datetime.fromisoformat(ev[1])
                 loc = ev[2] or "не указано"
                 dances = ev[3] or "не указаны"
-                msg += f"{i}. {dt.strftime('%d.%m %H:%M')} — {loc} | {dances}\n"
+                user_info = f"(👤 {ev[4]})"
+                msg += f"{i}. {dt.strftime('%d.%m %H:%M')} — {loc} | {dances} {user_info}\n"
 
             msg += "\n\nОтправь команду /delete N, где N — номер события."
 
@@ -168,16 +180,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return ConversationHandler.END
 
         elif query.data == "today":
-            events = get_today_events(user_id)
+            events = get_today_events_all()  # Все события на сегодня
+
             if not events:
-                msg = "Сегодня у тебя нет мероприятий 😊"
+                msg = "Сегодня нет мероприятий 😊"
             else:
-                msg = "🎉 Сегодня у тебя:\n\n"
+                msg = "🎉 Сегодня:\n\n"
                 for ev in events:
                     dt = datetime.fromisoformat(ev[1])
                     loc = ev[2] or "не указано"
                     dances = ev[3] or "не указаны"
-                    msg += f"• {dt.strftime('%H:%M')} — {loc} | {dances}\n"
+                    # Для админов показываем ID пользователя
+                    if is_admin(user_id):
+                        user_info = f"(👤 {ev[4]})"
+                    else:
+                        user_info = ""
+                    msg += f"• {dt.strftime('%H:%M')} — {loc} | {dances} {user_info}\n"
 
             await query.edit_message_text(msg, reply_markup=get_main_menu(user_id))
             return ConversationHandler.END
@@ -189,7 +207,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                               reply_markup=get_main_menu(user_id))
                 return ConversationHandler.END
                 
-            events = get_all_events(user_id)
+            events = get_all_events()  # Все события
 
             if not events:
                 await query.edit_message_text("В базе данных нет событий.", 
@@ -201,7 +219,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     loc = ev[2] or "не указано"
                     dances = ev[3] or "не указаны"
                     is_past = "⏰" if dt < datetime.now() else "✅"
-                    msg += f"{is_past} {dt.strftime('%d.%m %H:%M')} — {loc} | {dances}\n"
+                    msg += f"{is_past} {dt.strftime('%d.%m %H:%M')} — {loc} | {dances} (👤 {ev[4]})\n"
 
                 await query.edit_message_text(msg, reply_markup=get_main_menu(user_id))
             return ConversationHandler.END
@@ -297,7 +315,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(existing_event_msg, reply_markup=get_main_menu(user_id))
         return ConversationHandler.END
 
-    # Сохраняем в context.user_data (сохраняется между перезапусками)
+    # Сохраняем в context.user_data
     context.user_data["event_data"] = {
         "datetime": dt,
         "location": location,
@@ -453,23 +471,30 @@ async def receive_dances(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def delete_event_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Проверяем, что это сообщение, а не что-то другое
     if update.message is None:
-        return  # или логируем ошибку
+        return
 
     user_id = update.effective_user.id
     args = context.args
 
+    # Проверяем права - только админы могут удалять
+    if not is_admin(user_id):
+        await update.message.reply_text(
+            "❌ У вас нет прав для удаления событий.",
+            reply_markup=get_main_menu(user_id)
+        )
+        return
+
     if not args or not args[0].isdigit():
         await update.message.reply_text(
             "❌ Неверный формат.\nИспользуй: /delete N, где N — номер события.\n"
-            "Сначала посмотри список через /events или кнопку «Мои мероприятия».",
+            "Сначала посмотри список через кнопку «Удалить событие».",
             reply_markup=get_main_menu(user_id)
         )
         return
 
     event_num = int(args[0])
-    events = get_upcoming_events(user_id)
+    events = get_upcoming_events_all()  # Все события
 
     if event_num < 1 or event_num > len(events):
         await update.message.reply_text(
@@ -481,9 +506,8 @@ async def delete_event_command(update: Update, context: ContextTypes.DEFAULT_TYP
     event_id = events[event_num - 1][0]  # id события
     delete_event(event_id)
 
-    db_type = "PostgreSQL" if os.getenv('RENDER') else "SQLite"
     await update.message.reply_text(
-        f"✅ Событие №{event_num} удалено из {db_type}!",
+        f"✅ Событие №{event_num} удалено!",
         reply_markup=get_main_menu(user_id)
     )
 
@@ -496,7 +520,7 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ У вас нет прав для выполнения этой команды.")
         return
 
-    events = get_all_events(user_id)
+    events = get_all_events()  # Все события
 
     if not events:
         await update.message.reply_text("В базе данных нет событий.")
@@ -507,7 +531,7 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             loc = ev[2] or "не указано"
             dances = ev[3] or "не указаны"
             is_past = "⏰" if dt < datetime.now() else "✅"
-            msg += f"{is_past} {dt.strftime('%d.%m %H:%M')} — {loc} | {dances}\n"
+            msg += f"{is_past} {dt.strftime('%d.%m %H:%M')} — {loc} | {dances} (👤 {ev[4]})\n"
 
         await update.message.reply_text(msg)
 
@@ -683,7 +707,7 @@ def main():
     print("✅ Бот запущен!")
     print(f"👑 Админы: {ADMIN_IDS}")
     print("🛡️  Защита от дубликатов включена")
-    print("💾 PostgreSQL база данных активна")
+    print("💾 Общая база данных активна")
 
     # Для Render - используем webhook
     if os.getenv('RENDER'):
