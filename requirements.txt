@@ -1,5 +1,6 @@
-python-telegram-bot[webhooks]>=20.8
+python-telegram-bot[job-queue,webhooks]>=20.8
 python-dotenv==1.0.0
 python-dateutil==2.9.0.post0
+
 
 
