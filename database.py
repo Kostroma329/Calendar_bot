@@ -277,3 +277,33 @@ def event_exists(user_id, event_datetime, location, dances):
     except Exception as e:
         logger.error(f"❌ Ошибка при проверке события: {e}")
         return False
+
+def event_exists_for_any_user(datetime, location, dances):
+    """Проверяет, существует ли такое событие у любого пользователя"""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        dances_str = ", ".join(dances) if dances else None
+        is_postgresql = os.getenv('RENDER') and PSYCOPG2_AVAILABLE
+        
+        if is_postgresql:
+            # PostgreSQL
+            cursor.execute('''
+                SELECT COUNT(*) FROM events 
+                WHERE event_datetime = %s AND location = %s AND dances = %s
+            ''', (datetime, location, dances_str))
+        else:
+            # SQLite
+            cursor.execute('''
+                SELECT COUNT(*) FROM events 
+                WHERE event_datetime = ? AND location = ? AND dances = ?
+            ''', (datetime.isoformat(), location, dances_str))
+        
+        count = cursor.fetchone()[0]
+        conn.close()
+        return count > 0
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка при проверке существования события: {e}")
+        return False
