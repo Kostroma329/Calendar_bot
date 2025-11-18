@@ -2,7 +2,7 @@
 import logging
 import sqlite3
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, ContextTypes,
@@ -10,7 +10,7 @@ from telegram.ext import (
 )
 
 from config import BOT_TOKEN
-from database import init_db, add_event, get_upcoming_events, delete_event, get_today_events, get_all_events
+from database import init_db, add_event, get_upcoming_events, delete_event, get_today_events, get_all_events, event_exists
 from parser import extract_with_spacy
 from admin import is_admin, get_admin_commands, get_user_commands, ADMIN_IDS
 
@@ -25,6 +25,48 @@ logger = logging.getLogger(__name__)
 AWAITING_CONFIRMATION, AWAITING_LOCATION, AWAITING_DANCES = 1, 2, 3
 
 
+async def send_daily_reminders(context: ContextTypes.DEFAULT_TYPE):
+    """Отправка напоминаний за 1 день до события"""
+    try:
+        conn = sqlite3.connect("events.db", check_same_thread=False)
+        cursor = conn.cursor()
+        
+        # Время через 24 часа
+        reminder_start = datetime.now() + timedelta(hours=24)
+        reminder_end = reminder_start + timedelta(minutes=30)  # 30-минутное окно
+        
+        cursor.execute('''
+            SELECT DISTINCT user_id, event_datetime, location, dances 
+            FROM events 
+            WHERE event_datetime BETWEEN ? AND ?
+        ''', (reminder_start.isoformat(), reminder_end.isoformat()))
+        
+        events = cursor.fetchall()
+        
+        for event in events:
+            user_id, event_datetime, location, dances = event
+            dt = datetime.fromisoformat(event_datetime)
+            
+            message = (
+                "🔔 Напоминание за 1 день!\n\n"
+                f"📅 Завтра {dt.strftime('%d.%m в %H:%M')}\n"
+                f"📍 {location or 'Место не указано'}\n"
+                f"💃 {dances or 'Танцы не указаны'}\n\n"
+                f"Не забудь подготовиться! 🕺💃"
+            )
+            
+            try:
+                await context.bot.send_message(chat_id=user_id, text=message)
+                logger.info(f"Отправлено напоминание пользователю {user_id}")
+            except Exception as e:
+                logger.error(f"Не удалось отправить напоминание пользователю {user_id}: {e}")
+        
+        conn.close()
+        
+    except Exception as e:
+        logger.error(f"Ошибка в send_daily_reminders: {e}")
+
+
 def get_main_menu(user_id=None):
     """Возвращает главное меню с кнопками в зависимости от прав пользователя"""
     if user_id and is_admin(user_id):
@@ -33,9 +75,7 @@ def get_main_menu(user_id=None):
             [InlineKeyboardButton("➕ Добавить событие", callback_data="add_event")],
             [InlineKeyboardButton("📅 Мои мероприятия", callback_data="show_events")],
             [InlineKeyboardButton("🗑️ Удалить событие", callback_data="delete_event")],
-            [InlineKeyboardButton("🎯 Сегодня есть мероприятие?", callback_data="today")],
-            [InlineKeyboardButton("🔧 Отладка", callback_data="debug")],
-            [InlineKeyboardButton("📊 Статистика", callback_data="stats")]
+            [InlineKeyboardButton("🎯 Сегодня есть мероприятие?", callback_data="today")]
         ]
     else:
         # Меню для обычного пользователя
@@ -196,6 +236,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                         parse_mode="Markdown")
         return ConversationHandler.END
 
+    # Проверяем, нет ли уже такого события
+    if event_exists(user_id, dt, location, dances):
+        dances_str = ", ".join(dances) if dances else "не указаны"
+        existing_event_msg = (
+            "❌ Такое событие уже существует!\n\n"
+            f"📅 {dt.strftime('%d.%m.%Y %H:%M')}\n"
+            f"📍 {location or 'не указано'}\n"
+            f"💃 {dances_str}\n\n"
+            "Измени дату, место или танцы и попробуй снова."
+        )
+        await update.message.reply_text(existing_event_msg, reply_markup=get_main_menu(user_id))
+        return ConversationHandler.END
+
     # Сохраняем в context.user_data (сохраняется между перезапусками)
     context.user_data["event_data"] = {
         "datetime": dt,
@@ -240,6 +293,20 @@ async def confirm_or_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = context.user_data["event_data"]
 
     if query.data == "confirm":
+        # Двойная проверка перед сохранением
+        if event_exists(user_id, data["datetime"], data["location"], data["dances"]):
+            dances_str = ", ".join(data["dances"]) if data["dances"] else "не указаны"
+            existing_event_msg = (
+                "❌ Пока ты подтверждал, такое событие уже было создано!\n\n"
+                f"📅 {data['datetime'].strftime('%d.%m.%Y %H:%M')}\n"
+                f"📍 {data['location'] or 'не указано'}\n"
+                f"💃 {dances_str}\n\n"
+                "Проверь свои события или измени данные."
+            )
+            await query.edit_message_text(existing_event_msg, reply_markup=get_main_menu(user_id))
+            context.user_data.pop("event_data", None)
+            return ConversationHandler.END
+
         success = add_event(user_id, data["datetime"], data["location"], data["dances"], data["raw_text"])
         if success:
             await query.edit_message_text("✅ Отлично! Событие сохранено в календаре.", reply_markup=get_main_menu(user_id))
@@ -456,6 +523,20 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(help_text, reply_markup=get_main_menu(user_id))
 
 
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отмена текущей операции"""
+    user_id = update.effective_user.id
+    
+    # Очищаем временные данные
+    context.user_data.pop("event_data", None)
+    
+    await update.message.reply_text(
+        "❌ Операция отменена.",
+        reply_markup=get_main_menu(user_id)
+    )
+    return ConversationHandler.END
+
+
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик ошибок"""
     logger.error(f"Ошибка: {context.error}", exc_info=context.error)
@@ -468,10 +549,15 @@ def main():
     # Создаем Application
     application = Application.builder().token(BOT_TOKEN).build()
 
+    # Добавляем job для напоминаний (проверка каждые 30 минут)
+    job_queue = application.job_queue
+    job_queue.run_repeating(send_daily_reminders, interval=1800, first=10)  # 1800 сек = 30 минут
+
     # Обработчик диалога
     conv_handler = ConversationHandler(
         entry_points=[
-            MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
+            MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message),
+            CommandHandler("add", handle_message)  # Добавляем команду /add как entry point
         ],
         states={
             AWAITING_CONFIRMATION: [
@@ -484,7 +570,11 @@ def main():
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_dances)
             ]
         },
-        fallbacks=[CommandHandler("start", start)],
+        fallbacks=[
+            CommandHandler("start", start),
+            CommandHandler("cancel", cancel_command),
+            CommandHandler("help", help_command)
+        ],
         name="conversation",
         persistent=False
     )
@@ -496,6 +586,7 @@ def main():
     application.add_handler(CommandHandler("delete", delete_event_command))
     application.add_handler(CommandHandler("debug", debug_command))
     application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(CommandHandler("cancel", cancel_command))
     application.add_handler(CallbackQueryHandler(button_handler))
 
     # Добавляем обработчик ошибок
@@ -504,6 +595,8 @@ def main():
     # Запускаем бота
     print("✅ Бот запущен с системой прав!")
     print(f"👑 Админы: {ADMIN_IDS}")
+    print("🔔 Система напоминаний активирована")
+    print("🛡️  Защита от дубликатов включена")
 
     # Для Render - используем webhook
     if os.getenv('RENDER'):
