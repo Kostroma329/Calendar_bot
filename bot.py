@@ -27,33 +27,55 @@ logger = logging.getLogger(__name__)
 AWAITING_CONFIRMATION, AWAITING_LOCATION, AWAITING_DANCES = 1, 2, 3
 
 
+def get_moscow_time():
+    """Получение текущего времени в Московском часовом поясе (UTC+3)"""
+    return datetime.now() + timedelta(hours=3)
+
+
+def convert_to_moscow_time(dt):
+    """Конвертирует время в Московский часовой пояс"""
+    return dt + timedelta(hours=3)
+
+
+def convert_to_utc(dt):
+    """Конвертирует время в UTC"""
+    return dt - timedelta(hours=3)
+
+
 async def send_daily_reminders(context: ContextTypes.DEFAULT_TYPE):
-    """Отправка напоминаний за 1 день до события"""
+    """Отправка напоминаний за 1 день до события (только создателю события)"""
     try:
         from database import get_connection
         conn = get_connection()
         cursor = conn.cursor()
         
-        # Время через 24 часа
-        reminder_start = datetime.now() + timedelta(hours=24)
+        # Текущее время в Московском часовом поясе
+        moscow_now = get_moscow_time()
+        
+        # Время через 24 часа в Московском времени
+        reminder_start = moscow_now + timedelta(hours=24)
         reminder_end = reminder_start + timedelta(minutes=30)
+        
+        # Конвертируем в UTC для запроса к базе данных
+        reminder_start_utc = convert_to_utc(reminder_start)
+        reminder_end_utc = convert_to_utc(reminder_end)
         
         is_postgresql = os.getenv('RENDER')
         
         if is_postgresql:
-            # PostgreSQL
+            # PostgreSQL - выбираем ВСЕ события в диапазоне
             cursor.execute('''
-                SELECT DISTINCT user_id, event_datetime, location, dances 
+                SELECT user_id, event_datetime, location, dances 
                 FROM events 
                 WHERE event_datetime BETWEEN %s AND %s
-            ''', (reminder_start, reminder_end))
+            ''', (reminder_start_utc, reminder_end_utc))
         else:
-            # SQLite
+            # SQLite - выбираем ВСЕ события в диапазоне
             cursor.execute('''
-                SELECT DISTINCT user_id, event_datetime, location, dances 
+                SELECT user_id, event_datetime, location, dances 
                 FROM events 
                 WHERE event_datetime BETWEEN ? AND ?
-            ''', (reminder_start.isoformat(), reminder_end.isoformat()))
+            ''', (reminder_start_utc.isoformat(), reminder_end_utc.isoformat()))
         
         events = cursor.fetchall()
         conn.close()
@@ -62,13 +84,17 @@ async def send_daily_reminders(context: ContextTypes.DEFAULT_TYPE):
         if is_postgresql:
             events = [(ev[0], ev[1].isoformat(), ev[2], ev[3]) for ev in events]
         
+        sent_reminders = 0
         for event in events:
             user_id, event_datetime, location, dances = event
-            dt = datetime.fromisoformat(event_datetime)
+            
+            # Конвертируем время события в Московский часовой пояс
+            event_dt_utc = datetime.fromisoformat(event_datetime.replace('Z', '+00:00'))
+            event_dt_moscow = convert_to_moscow_time(event_dt_utc)
             
             message = (
                 "🔔 Напоминание за 1 день!\n\n"
-                f"📅 Завтра {dt.strftime('%d.%m в %H:%M')}\n"
+                f"📅 Завтра {event_dt_moscow.strftime('%d.%m в %H:%M')}\n"
                 f"📍 {location or 'Место не указано'}\n"
                 f"💃 {dances or 'Танцы не указаны'}\n\n"
                 f"Не забудь подготовиться! 🕺💃"
@@ -76,9 +102,12 @@ async def send_daily_reminders(context: ContextTypes.DEFAULT_TYPE):
             
             try:
                 await context.bot.send_message(chat_id=user_id, text=message)
-                logger.info(f"Отправлено напоминание пользователю {user_id}")
+                sent_reminders += 1
+                logger.info(f"Отправлено напоминание создателю {user_id}")
             except Exception as e:
                 logger.error(f"Не удалось отправить напоминание пользователю {user_id}: {e}")
+        
+        logger.info(f"Всего отправлено напоминаний: {sent_reminders}")
         
     except Exception as e:
         # Не логируем как ошибку, если таблица еще не создана
@@ -140,6 +169,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 msg = "📅 Все ближайшие мероприятия:\n\n"
                 for ev in events:
                     dt = datetime.fromisoformat(ev[1])
+                    dt_moscow = convert_to_moscow_time(dt)  # Конвертируем в Московское время
                     loc = ev[2] or "не указано"
                     dances = ev[3] or "не указаны"
                     # Для админов показываем ID пользователя, для обычных - просто событие
@@ -147,7 +177,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         user_info = f"(👤 {ev[4]})"
                     else:
                         user_info = ""
-                    msg += f"• {dt.strftime('%d.%m %H:%M')} — {loc} | {dances} {user_info}\n"
+                    msg += f"• {dt_moscow.strftime('%d.%m %H:%M')} — {loc} | {dances} {user_info}\n"
             
             await query.edit_message_text(msg, reply_markup=get_main_menu(user_id))
             return ConversationHandler.END
@@ -169,10 +199,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg = "🗑️ Выбери событие для удаления:\n\n"
             for i, ev in enumerate(events, 1):
                 dt = datetime.fromisoformat(ev[1])
+                dt_moscow = convert_to_moscow_time(dt)  # Конвертируем в Московское время
                 loc = ev[2] or "не указано"
                 dances = ev[3] or "не указаны"
                 user_info = f"(👤 {ev[4]})"
-                msg += f"{i}. {dt.strftime('%d.%m %H:%M')} — {loc} | {dances} {user_info}\n"
+                msg += f"{i}. {dt_moscow.strftime('%d.%m %H:%M')} — {loc} | {dances} {user_info}\n"
 
             msg += "\n\nОтправь команду /delete N, где N — номер события."
 
@@ -188,6 +219,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 msg = "🎉 Сегодня:\n\n"
                 for ev in events:
                     dt = datetime.fromisoformat(ev[1])
+                    dt_moscow = convert_to_moscow_time(dt)  # Конвертируем в Московское время
                     loc = ev[2] or "не указано"
                     dances = ev[3] or "не указаны"
                     # Для админов показываем ID пользователя
@@ -195,7 +227,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         user_info = f"(👤 {ev[4]})"
                     else:
                         user_info = ""
-                    msg += f"• {dt.strftime('%H:%M')} — {loc} | {dances} {user_info}\n"
+                    msg += f"• {dt_moscow.strftime('%H:%M')} — {loc} | {dances} {user_info}\n"
 
             await query.edit_message_text(msg, reply_markup=get_main_menu(user_id))
             return ConversationHandler.END
@@ -216,10 +248,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 msg = "🔧 Все события в БД:\n\n"
                 for ev in events:
                     dt = datetime.fromisoformat(ev[1])
+                    dt_moscow = convert_to_moscow_time(dt)  # Конвертируем в Московское время
                     loc = ev[2] or "не указано"
                     dances = ev[3] or "не указаны"
-                    is_past = "⏰" if dt < datetime.now() else "✅"
-                    msg += f"{is_past} {dt.strftime('%d.%m %H:%M')} — {loc} | {dances} (👤 {ev[4]})\n"
+                    is_past = "⏰" if dt_moscow < get_moscow_time() else "✅"
+                    msg += f"{is_past} {dt_moscow.strftime('%d.%m %H:%M')} — {loc} | {dances} (👤 {ev[4]})\n"
 
                 await query.edit_message_text(msg, reply_markup=get_main_menu(user_id))
             return ConversationHandler.END
@@ -270,6 +303,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"• Уникальных пользователей: {total_users}\n"
                     f"• Админов: {len(ADMIN_IDS)}\n"
                     f"• База данных: {db_type}\n"
+                    f"• Часовой пояс: Москва (UTC+3)\n"
                 )
 
                 await query.edit_message_text(stats_msg, reply_markup=get_main_menu(user_id))
@@ -528,10 +562,11 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = "🔧 Все события в БД:\n\n"
         for ev in events:
             dt = datetime.fromisoformat(ev[1])
+            dt_moscow = convert_to_moscow_time(dt)  # Конвертируем в Московское время
             loc = ev[2] or "не указано"
             dances = ev[3] or "не указаны"
-            is_past = "⏰" if dt < datetime.now() else "✅"
-            msg += f"{is_past} {dt.strftime('%d.%m %H:%M')} — {loc} | {dances} (👤 {ev[4]})\n"
+            is_past = "⏰" if dt_moscow < get_moscow_time() else "✅"
+            msg += f"{is_past} {dt_moscow.strftime('%d.%m %H:%M')} — {loc} | {dances} (👤 {ev[4]})\n"
 
         await update.message.reply_text(msg)
 
@@ -583,6 +618,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• Уникальных пользователей: {total_users}\n"
             f"• Админов: {len(ADMIN_IDS)}\n"
             f"• База данных: {db_type}\n"
+            f"• Часовой пояс: Москва (UTC+3)\n"
         )
 
         await update.message.reply_text(stats_msg)
@@ -649,6 +685,7 @@ def main():
     time.sleep(3)
     
     print("✅ База данных готова")
+    print("🌍 Часовой пояс: Москва (UTC+3)")
 
     # Создаем Application
     application = Application.builder().token(BOT_TOKEN).build()
