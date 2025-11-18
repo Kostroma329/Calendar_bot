@@ -13,12 +13,12 @@ def get_admin_commands():
     """Возвращает список команд для администраторов"""
     return [
         "start", "help", "add", "delete", "cancel",
-        "backup", "restore", "backupinfo", "debug", "stats"
+        "debug", "stats"
     ]
 
 def get_user_commands():
     """Возвращает список команд для обычных пользователей"""
-    return ["start", "add", "delete", "cancel"]
+    return ["start", "help", "add", "cancel"]
 
 def add_admin(user_id: int):
     """Добавляет администратора"""
@@ -31,4 +31,5 @@ def remove_admin(user_id: int):
 def get_admin_ids() -> set:
     """Возвращает список ID администраторов"""
     return ADMIN_IDS.copy()
+
 
