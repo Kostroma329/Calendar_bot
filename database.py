@@ -1,8 +1,11 @@
 # database.py
 import sqlite3
+import json
 import os
 from datetime import datetime
+import logging
 
+logger = logging.getLogger(__name__)
 def init_db():
     """Инициализация базы данных"""
     conn = sqlite3.connect("events.db", check_same_thread=False)
@@ -149,3 +152,94 @@ def delete_event(event_id):
     except Exception as e:
         print(f"❌ Ошибка при удалении события: {e}")
         return False
+def backup_events():
+    """Резервное копирование событий в JSON файл"""
+    try:
+        conn = sqlite3.connect("events.db", check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM events")
+        events = cursor.fetchall()
+        
+        # Получаем названия колонок
+        cursor.execute("PRAGMA table_info(events)")
+        columns = [column[1] for column in cursor.fetchall()]
+        
+        conn.close()
+        
+        # Преобразуем в список словарей для лучшей читаемости
+        events_dict = []
+        for event in events:
+            event_dict = dict(zip(columns, event))
+            events_dict.append(event_dict)
+        
+        backup_data = {
+            "backup_time": datetime.now().isoformat(),
+            "events_count": len(events_dict),
+            "events": events_dict
+        }
+        
+        with open("backup_events.json", "w", encoding="utf-8") as f:
+            json.dump(backup_data, f, ensure_ascii=False, indent=2)
+            
+        print(f"✅ Резервная копия создана: {len(events_dict)} событий")
+        return True
+    except Exception as e:
+        print(f"❌ Ошибка резервного копирования: {e}")
+        return False
+
+def restore_events():
+    """Восстановление событий из JSON файла"""
+    try:
+        if not os.path.exists("backup_events.json"):
+            print("ℹ️  Файл резервной копии не найден")
+            return False
+            
+        with open("backup_events.json", "r", encoding="utf-8") as f:
+            backup_data = json.load(f)
+        
+        conn = sqlite3.connect("events.db", check_same_thread=False)
+        cursor = conn.cursor()
+        
+        restored_count = 0
+        for event_dict in backup_data["events"]:
+            try:
+                # Создаем кортеж значений в правильном порядке
+                event_values = (
+                    event_dict.get('id'),
+                    event_dict.get('user_id'),
+                    event_dict.get('event_datetime'),
+                    event_dict.get('location'),
+                    event_dict.get('dances'),
+                    event_dict.get('raw_text'),
+                    event_dict.get('created_at')
+                )
+                
+                cursor.execute('''
+                    INSERT OR IGNORE INTO events 
+                    (id, user_id, event_datetime, location, dances, raw_text, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', event_values)
+                restored_count += 1
+            except Exception as e:
+                print(f"❌ Ошибка при восстановлении события {event_dict.get('id')}: {e}")
+        
+        conn.commit()
+        conn.close()
+        print(f"✅ Восстановлено {restored_count} событий из резервной копии от {backup_data.get('backup_time', 'неизвестно')}")
+        return True
+    except Exception as e:
+        print(f"❌ Ошибка восстановления: {e}")
+        return False
+
+def get_backup_info():
+    """Информация о резервной копии"""
+    try:
+        if not os.path.exists("backup_events.json"):
+            return "Резервная копия не найдена"
+            
+        with open("backup_events.json", "r", encoding="utf-8") as f:
+            backup_data = json.load(f)
+            
+        return f"Резервная копия от {backup_data['backup_time']} ({backup_data['events_count']} событий)"
+    except Exception as e:
+        return f"Ошибка чтения резервной копии: {e}"
