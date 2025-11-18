@@ -360,3 +360,146 @@ def event_exists_for_any_user(datetime, location, dances):
         logger.error(f"❌ Ошибка при проверке существования события: {e}")
         return False
 
+def init_db():
+    """Инициализация базы данных"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    # Проверяем, используем ли мы PostgreSQL
+    is_postgresql = os.getenv('RENDER') and PSYCOPG2_AVAILABLE
+    
+    if is_postgresql:
+        # PostgreSQL
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS events (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                event_datetime TIMESTAMP NOT NULL,
+                location TEXT,
+                dances TEXT,
+                raw_text TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS bot_users (
+                user_id BIGINT PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                last_name TEXT,
+                started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        print("✅ Таблицы events и bot_users созданы в PostgreSQL")
+    else:
+        # SQLite
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                event_datetime TEXT NOT NULL,
+                location TEXT,
+                dances TEXT,
+                raw_text TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS bot_users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                last_name TEXT,
+                started_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                last_activity TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        print("✅ Таблицы events и bot_users созданы в SQLite")
+    
+    conn.commit()
+    conn.close()
+
+def add_bot_user(user_id, username=None, first_name=None, last_name=None):
+    """Добавление/обновление пользователя бота"""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        is_postgresql = os.getenv('RENDER') and PSYCOPG2_AVAILABLE
+        
+        if is_postgresql:
+            cursor.execute('''
+                INSERT INTO bot_users (user_id, username, first_name, last_name, last_activity)
+                VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+                ON CONFLICT (user_id) 
+                DO UPDATE SET 
+                    username = EXCLUDED.username,
+                    first_name = EXCLUDED.first_name,
+                    last_name = EXCLUDED.last_name,
+                    last_activity = CURRENT_TIMESTAMP
+            ''', (user_id, username, first_name, last_name))
+        else:
+            cursor.execute('''
+                INSERT OR REPLACE INTO bot_users 
+                (user_id, username, first_name, last_name, last_activity)
+                VALUES (?, ?, ?, ?, datetime('now'))
+            ''', (user_id, username, first_name, last_name))
+        
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"❌ Ошибка при добавлении пользователя бота: {e}")
+        return False
+
+def get_all_bot_users():
+    """Получение списка всех пользователей бота"""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('SELECT user_id FROM bot_users')
+        users = [row[0] for row in cursor.fetchall()]
+        conn.close()
+        return users
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка при получении списка пользователей бота: {e}")
+        return []
+
+def get_bot_users_stats():
+    """Статистика пользователей бота"""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        is_postgresql = os.getenv('RENDER') and PSYCOPG2_AVAILABLE
+        
+        if is_postgresql:
+            cursor.execute('SELECT COUNT(*) FROM bot_users')
+            total_users = cursor.fetchone()[0]
+            
+            cursor.execute('''
+                SELECT COUNT(*) FROM bot_users 
+                WHERE last_activity >= CURRENT_TIMESTAMP - INTERVAL '30 days'
+            ''')
+            active_users = cursor.fetchone()[0]
+        else:
+            cursor.execute('SELECT COUNT(*) FROM bot_users')
+            total_users = cursor.fetchone()[0]
+            
+            cursor.execute('''
+                SELECT COUNT(*) FROM bot_users 
+                WHERE last_activity >= datetime('now', '-30 days')
+            ''')
+            active_users = cursor.fetchone()[0]
+        
+        conn.close()
+        return total_users, active_users
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка при получении статистики пользователей: {e}")
+        return 0, 0
