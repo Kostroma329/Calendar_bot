@@ -9,13 +9,16 @@ def is_admin(user_id: int) -> bool:
     """Проверяет, является ли пользователь администратором"""
     return user_id in ADMIN_IDS
 
-def get_admin_commands() -> list:
+def get_admin_commands():
     """Возвращает список команд для администраторов"""
-    return ['start', 'delete', 'debug', 'stats', 'help']
+    return [
+        "start", "help", "add", "delete", "cancel",
+        "backup", "restore", "backupinfo", "debug", "stats"
+    ]
 
-def get_user_commands() -> list:
+def get_user_commands():
     """Возвращает список команд для обычных пользователей"""
-    return ['start', 'delete', 'help']
+    return ["start", "add", "delete", "cancel"]
 
 def add_admin(user_id: int):
     """Добавляет администратора"""
@@ -28,3 +31,4 @@ def remove_admin(user_id: int):
 def get_admin_ids() -> set:
     """Возвращает список ID администраторов"""
     return ADMIN_IDS.copy()
+
