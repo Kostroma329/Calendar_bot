@@ -333,139 +333,113 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return ConversationHandler.END
 
         elif query.data == "broadcast":
-            # Только для админов
-            if not is_admin(user_id):
-                await query.edit_message_text("❌ У вас нет прав для рассылки.", 
-                                              reply_markup=get_main_menu(user_id))
-                return ConversationHandler.END
-            
-            # Запускаем процесс рассылки
-            events = get_upcoming_events_all()
-            
-            if not events:
-                await query.edit_message_text("❌ Нет мероприятий для рассылки.", 
-                                              reply_markup=get_main_menu(user_id))
-                return ConversationHandler.END
-
-            # Создаем клавиатуру с событиями
-            keyboard = []
-            for i, event in enumerate(events, 1):
-                dt = datetime.fromisoformat(event[1])
-                dt_moscow = convert_to_moscow_time(dt)
-                loc = event[2] or "не указано"
-                dances = event[3] or "не указаны"
-                
-                button_text = f"{i}. {dt_moscow.strftime('%d.%m %H:%M')} - {loc}"
-                if len(button_text) > 40:
-                    button_text = button_text[:37] + "..."
-                
-                keyboard.append([InlineKeyboardButton(button_text, callback_data=f"broadcast_{event[0]}")])
-            
-            keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel_broadcast")])
-            
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await query.edit_message_text(
-                "📢 Выберите мероприятие для рассылки напоминания всем пользователям:",
-                reply_markup=reply_markup
-            )
-            return ConversationHandler.END
-
-        # Обработка отмены рассылки
-        elif query.data == "cancel_broadcast":
-            await query.edit_message_text("❌ Рассылка отменена.", reply_markup=get_main_menu(user_id))
-            return ConversationHandler.END
-
-    except Exception as e:
-        if "Message is not modified" not in str(e):
-            logger.error(f"Ошибка в button_handler: {e}")
-            await query.edit_message_text("❌ Произошла ошибка. Попробуйте снова.", 
-                                          reply_markup=get_main_menu(user_id))
+    # Только для админов
+    if not is_admin(user_id):
+        await query.edit_message_text("❌ У вас нет прав для рассылки.", 
+                                      reply_markup=get_main_menu(user_id))
+        return ConversationHandler.END
+    
+    # Запускаем процесс рассылки
+    events = get_upcoming_events_all()
+    
+    if not events:
+        await query.edit_message_text("❌ Нет мероприятий для рассылки.", 
+                                      reply_markup=get_main_menu(user_id))
         return ConversationHandler.END
 
-
-async def handle_broadcast_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка выбора события для рассылки"""
-    query = update.callback_query
-    await query.answer()
-    user_id = update.effective_user.id
-
-    if not is_admin(user_id):
-        await query.edit_message_text("❌ У вас нет прав для этой операции.")
-        return
-
-    if query.data == "cancel_broadcast":
-        await query.edit_message_text("❌ Рассылка отменена.", reply_markup=get_main_menu(user_id))
-        return
-
-    if query.data.startswith("broadcast_"):
-        event_id = int(query.data.split("_")[1])
-        
-        # Получаем информацию о событии
-        event = get_event_by_id(event_id)
-        if not event:
-            await query.edit_message_text("❌ Событие не найдено.", reply_markup=get_main_menu(user_id))
-            return
-
-        # Сохраняем event_id в context для использования в следующем шаге
-        context.user_data["broadcast_event_id"] = event_id
-        
-        # Показываем подтверждение
+    # Создаем клавиатуру с событиями
+    keyboard = []
+    for i, event in enumerate(events, 1):
         dt = datetime.fromisoformat(event[1])
         dt_moscow = convert_to_moscow_time(dt)
         loc = event[2] or "не указано"
         dances = event[3] or "не указаны"
         
-        confirmation_text = (
-            "📢 Подтвердите рассылку:\n\n"
-            f"📅 {dt_moscow.strftime('%d.%m.%Y в %H:%M')}\n"
-            f"📍 {loc}\n"
-            f"💃 {dances}\n\n"
-            "Отправить напоминание ВСЕМ пользователям бота?"
-        )
+        button_text = f"{i}. {dt_moscow.strftime('%d.%m %H:%M')} - {loc}"
+        if len(button_text) > 40:
+            button_text = button_text[:37] + "..."
         
-        keyboard = [
-            [
-                InlineKeyboardButton("✅ Да, отправить всем", callback_data="confirm_broadcast"),
-                InlineKeyboardButton("❌ Отмена", callback_data="cancel_broadcast")
-            ]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.edit_message_text(confirmation_text, reply_markup=reply_markup)
+        keyboard.append([InlineKeyboardButton(button_text, callback_data=f"broadcast_{event[0]}")])
+    
+    keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel_broadcast")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        "📢 Выберите мероприятие для рассылки напоминания всем пользователям:",
+        reply_markup=reply_markup
+    )
+    return ConversationHandler.END
 
-
-async def execute_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Выполнение рассылки напоминания всем пользователям бота"""
-    query = update.callback_query
-    await query.answer()
-    user_id = update.effective_user.id
-
+# Обработка выбора конкретного события для рассылки
+elif query.data.startswith("broadcast_"):
+    # Только для админов
     if not is_admin(user_id):
-        await query.edit_message_text("❌ У вас нет прав для этой операции.")
-        return
+        await query.edit_message_text("❌ У вас нет прав для рассылки.", 
+                                      reply_markup=get_main_menu(user_id))
+        return ConversationHandler.END
 
-    if query.data != "confirm_broadcast":
-        await query.edit_message_text("❌ Рассылка отменена.", reply_markup=get_main_menu(user_id))
-        return
+    event_id = int(query.data.split("_")[1])
+    
+    # Получаем информацию о событии
+    event = get_event_by_id(event_id)
+    if not event:
+        await query.edit_message_text("❌ Событие не найдено.", reply_markup=get_main_menu(user_id))
+        return ConversationHandler.END
+
+    # Сохраняем event_id в context для использования в следующем шаге
+    context.user_data["broadcast_event_id"] = event_id
+    
+    # Показываем подтверждение
+    dt = datetime.fromisoformat(event[1])
+    dt_moscow = convert_to_moscow_time(dt)
+    loc = event[2] or "не указано"
+    dances = event[3] or "не указаны"
+    
+    confirmation_text = (
+        "📢 Подтвердите рассылку:\n\n"
+        f"📅 {dt_moscow.strftime('%d.%m.%Y в %H:%M')}\n"
+        f"📍 {loc}\n"
+        f"💃 {dances}\n\n"
+        "Отправить напоминание ВСЕМ пользователям бота?"
+    )
+    
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Да, отправить всем", callback_data="confirm_broadcast"),
+            InlineKeyboardButton("❌ Отмена", callback_data="cancel_broadcast")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(confirmation_text, reply_markup=reply_markup)
+    return ConversationHandler.END
+
+# Подтверждение рассылки
+elif query.data == "confirm_broadcast":
+    # Только для админов
+    if not is_admin(user_id):
+        await query.edit_message_text("❌ У вас нет прав для рассылки.", 
+                                      reply_markup=get_main_menu(user_id))
+        return ConversationHandler.END
 
     event_id = context.user_data.get("broadcast_event_id")
     if not event_id:
         await query.edit_message_text("❌ Ошибка: событие не найдено.", reply_markup=get_main_menu(user_id))
-        return
+        return ConversationHandler.END
 
     # Получаем информацию о событии
     event = get_event_by_id(event_id)
     if not event:
         await query.edit_message_text("❌ Событие не найдено.", reply_markup=get_main_menu(user_id))
-        return
+        return ConversationHandler.END
 
     # Получаем ВСЕХ пользователей бота
     all_bot_users = get_all_bot_users()
     
     if not all_bot_users:
         await query.edit_message_text("❌ Нет пользователей для рассылки.", reply_markup=get_main_menu(user_id))
-        return
+        return ConversationHandler.END
 
     dt = datetime.fromisoformat(event[1])
     dt_moscow = convert_to_moscow_time(dt)
@@ -510,7 +484,14 @@ async def execute_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Очищаем временные данные
     context.user_data.pop("broadcast_event_id", None)
+    return ConversationHandler.END
 
+# Обработка отмены рассылки
+elif query.data == "cancel_broadcast":
+    await query.edit_message_text("❌ Рассылка отменена.", reply_markup=get_main_menu(user_id))
+    # Очищаем временные данные
+    context.user_data.pop("broadcast_event_id", None)
+    return ConversationHandler.END
 
 async def send_instant_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Мгновенная отправка напоминания о конкретном мероприятии всем пользователям бота"""
@@ -1016,9 +997,6 @@ def main():
     application.add_handler(CommandHandler("broadcast", send_instant_reminder))
     application.add_handler(CommandHandler("remind", send_instant_reminder))
     application.add_handler(CallbackQueryHandler(button_handler))
-    application.add_handler(CallbackQueryHandler(handle_broadcast_selection, pattern="^broadcast_"))
-    application.add_handler(CallbackQueryHandler(handle_broadcast_selection, pattern="^cancel_broadcast$"))
-    application.add_handler(CallbackQueryHandler(execute_broadcast, pattern="^confirm_broadcast$"))
 
     # Добавляем обработчик ошибок
     application.add_error_handler(error_handler)
@@ -1045,3 +1023,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
