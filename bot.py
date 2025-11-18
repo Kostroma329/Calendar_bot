@@ -11,6 +11,7 @@ from telegram.ext import (
 
 from config import BOT_TOKEN
 from database import init_db, add_event, get_upcoming_events, delete_event, get_today_events, get_all_events, event_exists
+from database import backup_events, restore_events, get_backup_info
 from parser import extract_with_spacy
 from admin import is_admin, get_admin_commands, get_user_commands, ADMIN_IDS
 
@@ -75,7 +76,10 @@ def get_main_menu(user_id=None):
             [InlineKeyboardButton("➕ Добавить событие", callback_data="add_event")],
             [InlineKeyboardButton("📅 Мои мероприятия", callback_data="show_events")],
             [InlineKeyboardButton("🗑️ Удалить событие", callback_data="delete_event")],
-            [InlineKeyboardButton("🎯 Сегодня есть мероприятие?", callback_data="today")]
+            [InlineKeyboardButton("🎯 Сегодня есть мероприятие?", callback_data="today")],
+            [InlineKeyboardButton("🔧 Отладка", callback_data="debug")],
+            [InlineKeyboardButton("📊 Статистика", callback_data="stats")],
+            [InlineKeyboardButton("💾 Резервная копия", callback_data="backup")]
         ]
     else:
         # Меню для обычного пользователя
@@ -218,6 +222,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         except Exception as e:
             await query.edit_message_text(f"❌ Ошибка при получении статистики: {e}", reply_markup=get_main_menu(user_id))
+        return ConversationHandler.END
+
+    elif query.data == "backup":
+        # Проверяем права доступа
+        if not is_admin(user_id):
+            await query.edit_message_text("❌ У вас нет прав для выполнения этой команды.", reply_markup=get_main_menu(user_id))
+            return ConversationHandler.END
+            
+        backup_info = get_backup_info()
+        await query.edit_message_text(f"💾 {backup_info}", reply_markup=get_main_menu(user_id))
         return ConversationHandler.END
 
 
@@ -500,6 +514,49 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Ошибка при получении статистики: {e}")
 
 
+async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Создание резервной копии (только для админов)"""
+    user_id = update.effective_user.id
+
+    if not is_admin(user_id):
+        await update.message.reply_text("❌ У вас нет прав для выполнения этой команды.")
+        return
+
+    success = backup_events()
+    if success:
+        backup_info = get_backup_info()
+        await update.message.reply_text(f"✅ {backup_info}")
+    else:
+        await update.message.reply_text("❌ Не удалось создать резервную копию")
+
+
+async def restore_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Восстановление из резервной копии (только для админов)"""
+    user_id = update.effective_user.id
+
+    if not is_admin(user_id):
+        await update.message.reply_text("❌ У вас нет прав для выполнения этой команды.")
+        return
+
+    success = restore_events()
+    if success:
+        await update.message.reply_text("✅ Данные восстановлены из резервной копии")
+    else:
+        await update.message.reply_text("❌ Не удалось восстановить данные")
+
+
+async def backup_info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Информация о резервной копии (только для админов)"""
+    user_id = update.effective_user.id
+
+    if not is_admin(user_id):
+        await update.message.reply_text("❌ У вас нет прав для выполнения этой команды.")
+        return
+
+    backup_info = get_backup_info()
+    await update.message.reply_text(f"📊 {backup_info}")
+
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показывает доступные команды"""
     user_id = update.effective_user.id
@@ -545,6 +602,19 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     # Инициализация базы данных
     init_db()
+    
+    # Автоматическое восстановление из резервной копии при старте
+    print("🔄 Проверка резервной копии...")
+    backup_info = get_backup_info()
+    print(f"📁 {backup_info}")
+    
+    # Создаем резервную копию при старте
+    print("💾 Создание резервной копии при запуске...")
+    backup_success = backup_events()
+    if backup_success:
+        print("✅ Резервная копия создана")
+    else:
+        print("⚠️  Не удалось создать резервную копию")
 
     # Создаем Application с JobQueue
     application = Application.builder().token(BOT_TOKEN).build()
@@ -593,6 +663,9 @@ def main():
     application.add_handler(CommandHandler("delete", delete_event_command))
     application.add_handler(CommandHandler("debug", debug_command))
     application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(CommandHandler("backup", backup_command))
+    application.add_handler(CommandHandler("restore", restore_command))
+    application.add_handler(CommandHandler("backupinfo", backup_info_command))
     application.add_handler(CommandHandler("cancel", cancel_command))
     application.add_handler(CallbackQueryHandler(button_handler))
 
@@ -603,6 +676,7 @@ def main():
     print("✅ Бот запущен с системой прав!")
     print(f"👑 Админы: {ADMIN_IDS}")
     print("🛡️  Защита от дубликатов включена")
+    print("💾 Система резервного копирования активна")
 
     # Для Render - используем webhook
     if os.getenv('RENDER'):
