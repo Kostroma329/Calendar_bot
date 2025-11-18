@@ -15,6 +15,23 @@ from database import backup_events, restore_events, get_backup_info
 from parser import extract_with_spacy
 from admin import is_admin, get_admin_commands, get_user_commands, ADMIN_IDS
 
+def backup_on_exit():
+    """Создание резервной копии при завершении работы"""
+    print("\n💾 Создание резервной копии перед выходом...")
+    backup_events()
+
+# Регистрируем функцию для вызова при завершении
+atexit.register(backup_on_exit)
+
+# Также обрабатываем сигналы завершения
+def signal_handler(signum, frame):
+    print(f"\n💾 Создание резервной копии по сигналу {signum}...")
+    backup_events()
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
+
 # Настройка логирования
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -598,26 +615,27 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
-    # 1. Сначала пытаемся восстановить данные из резервной копии
-    print("🔄 Проверка и восстановление из резервной копии...")
+   atexit.register(backup_on_exit)
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    # 1. Сначала пытаемся восстановить данные
+    print("🔄 Восстановление из резервной копии...")
     restore_success = restore_events()
     
     if restore_success:
-        print("✅ Данные восстановлены из резервной копии")
+        print("✅ Данные восстановлены")
     else:
-        print("ℹ️  Резервной копии нет или ошибка восстановления")
+        print("ℹ️  Резервной копии нет")
     
-    # 2. Затем инициализируем базу данных (создаст таблицы если их нет)
+    # 2. Инициализируем базу
     init_db()
     
-    # 3. Создаем резервную копию текущего состояния
-    print("💾 Создание резервной копии...")
-    backup_success = backup_events()
-    if backup_success:
-        backup_info = get_backup_info()
-        print(f"✅ {backup_info}")
-    else:
-        print("⚠️  Не удалось создать резервную копию")
+    # 3. Создаем начальную резервную копию (если база не пустая)
+    events_count = len(get_all_events(ADMIN_IDS[0] if ADMIN_IDS else 0))
+    if events_count > 0:
+        print(f"💾 Создание резервной копии ({events_count} событий)...")
+        backup_events()
 
     # Создаем Application с JobQueue
     application = Application.builder().token(BOT_TOKEN).build()
@@ -697,5 +715,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
