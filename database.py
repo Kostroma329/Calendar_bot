@@ -243,3 +243,49 @@ def get_backup_info():
         return f"Резервная копия от {backup_data['backup_time']} ({backup_data['events_count']} событий)"
     except Exception as e:
         return f"Ошибка чтения резервной копии: {e}"
+
+def add_event(user_id, event_datetime, location, dances, raw_text):
+    """Добавление события в базу данных с автоматическим бэкапом"""
+    try:
+        conn = sqlite3.connect("events.db", check_same_thread=False)
+        cursor = conn.cursor()
+        
+        dances_str = ", ".join(dances) if dances else None
+        
+        cursor.execute('''
+            INSERT INTO events (user_id, event_datetime, location, dances, raw_text)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (user_id, event_datetime.isoformat(), location, dances_str, raw_text))
+        
+        conn.commit()
+        conn.close()
+        
+        # АВТОМАТИЧЕСКИЙ БЭКАП ПОСЛЕ ДОБАВЛЕНИЯ СОБЫТИЯ
+        print("💾 Автоматический бэкап после добавления события...")
+        backup_events()
+        
+        return True
+    except Exception as e:
+        print(f"❌ Ошибка при добавлении события: {e}")
+        return False
+
+def delete_event(event_id):
+    """Удаление события по ID с автоматическим бэкапом"""
+    try:
+        conn = sqlite3.connect("events.db", check_same_thread=False)
+        cursor = conn.cursor()
+        
+        cursor.execute('DELETE FROM events WHERE id = ?', (event_id,))
+        
+        conn.commit()
+        conn.close()
+        
+        # АВТОМАТИЧЕСКИЙ БЭКАП ПОСЛЕ УДАЛЕНИЯ СОБЫТИЯ
+        print("💾 Автоматический бэкап после удаления события...")
+        backup_events()
+        
+        return True
+    except Exception as e:
+        print(f"❌ Ошибка при удалении события: {e}")
+        return False
+
