@@ -2,9 +2,7 @@
 import logging
 import sqlite3
 import os
-import atexit
-import signal
-import sys
+import time
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
@@ -14,7 +12,6 @@ from telegram.ext import (
 
 from config import BOT_TOKEN
 from database import init_db, add_event, get_upcoming_events, delete_event, get_today_events, get_all_events, event_exists
-from database import backup_events, restore_events, get_backup_info
 from parser import extract_with_spacy
 from admin import is_admin, get_admin_commands, get_user_commands, ADMIN_IDS
 
@@ -29,35 +26,40 @@ logger = logging.getLogger(__name__)
 AWAITING_CONFIRMATION, AWAITING_LOCATION, AWAITING_DANCES = 1, 2, 3
 
 
-def backup_on_exit():
-    """Создание резервной копии при завершении работы"""
-    print("\n💾 Создание резервной копии перед выходом...")
-    backup_events()
-
-def signal_handler(signum, frame):
-    """Обработчик сигналов завершения"""
-    print(f"\n💾 Создание резервной копии по сигналу {signum}...")
-    backup_events()
-    sys.exit(0)
-
-
 async def send_daily_reminders(context: ContextTypes.DEFAULT_TYPE):
     """Отправка напоминаний за 1 день до события"""
     try:
-        conn = sqlite3.connect("events.db", check_same_thread=False)
+        from database import get_connection
+        conn = get_connection()
         cursor = conn.cursor()
         
         # Время через 24 часа
         reminder_start = datetime.now() + timedelta(hours=24)
-        reminder_end = reminder_start + timedelta(minutes=30)  # 30-минутное окно
+        reminder_end = reminder_start + timedelta(minutes=30)
         
-        cursor.execute('''
-            SELECT DISTINCT user_id, event_datetime, location, dances 
-            FROM events 
-            WHERE event_datetime BETWEEN ? AND ?
-        ''', (reminder_start.isoformat(), reminder_end.isoformat()))
+        is_postgresql = os.getenv('RENDER')
+        
+        if is_postgresql:
+            # PostgreSQL
+            cursor.execute('''
+                SELECT DISTINCT user_id, event_datetime, location, dances 
+                FROM events 
+                WHERE event_datetime BETWEEN %s AND %s
+            ''', (reminder_start, reminder_end))
+        else:
+            # SQLite
+            cursor.execute('''
+                SELECT DISTINCT user_id, event_datetime, location, dances 
+                FROM events 
+                WHERE event_datetime BETWEEN ? AND ?
+            ''', (reminder_start.isoformat(), reminder_end.isoformat()))
         
         events = cursor.fetchall()
+        conn.close()
+        
+        # Конвертируем даты для PostgreSQL
+        if is_postgresql:
+            events = [(ev[0], ev[1].isoformat(), ev[2], ev[3]) for ev in events]
         
         for event in events:
             user_id, event_datetime, location, dances = event
@@ -77,16 +79,10 @@ async def send_daily_reminders(context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.error(f"Не удалось отправить напоминание пользователю {user_id}: {e}")
         
-        conn.close()
-        
     except Exception as e:
-        logger.error(f"Ошибка в send_daily_reminders: {e}")
-
-
-async def periodic_backup(context: ContextTypes.DEFAULT_TYPE):
-    """Периодическое резервное копирование каждые 6 часов"""
-    print("🕒 Периодическое резервное копирование...")
-    backup_events()
+        # Не логируем как ошибку, если таблица еще не создана
+        if "no such table" not in str(e) and "relation" not in str(e):
+            logger.error(f"Ошибка в send_daily_reminders: {e}")
 
 
 def get_main_menu(user_id=None):
@@ -98,7 +94,6 @@ def get_main_menu(user_id=None):
             [InlineKeyboardButton("📅 Мои мероприятия", callback_data="show_events")],
             [InlineKeyboardButton("🗑️ Удалить событие", callback_data="delete_event")],
             [InlineKeyboardButton("🎯 Сегодня есть мероприятие?", callback_data="today")],
-            [InlineKeyboardButton("💾 Резервная копия", callback_data="backup")]
         ]
     else:
         # Меню для обычного пользователя
@@ -130,127 +125,147 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     user_id = update.effective_user.id
 
-    if query.data == "add_event":
-        await query.edit_message_text("Отправь описание мероприятия:\n\n"
-                                      "Пример: *«Завтра в 19:00 в Троицком танцуем вальс»*", parse_mode="Markdown")
-        return ConversationHandler.END
+    try:
+        if query.data == "add_event":
+            await query.edit_message_text("Отправь описание мероприятия:\n\n"
+                                          "Пример: *«Завтра в 19:00 в Троицком танцуем вальс»*", 
+                                          parse_mode="Markdown")
+            return ConversationHandler.END
 
-    elif query.data == "show_events":
-        events = get_upcoming_events(user_id)
+        elif query.data == "show_events":
+            events = get_upcoming_events(user_id)
 
-        if not events:
-            msg = "У тебя пока нет запланированных мероприятий."
-        else:
-            msg = "📌 Твои ближайшие мероприятия:\n\n"
-            for ev in events:
-                dt = datetime.fromisoformat(ev[1])
-                loc = ev[2] or "не указано"
-                dances = ev[3] or "не указаны"
-                msg += f"• {dt.strftime('%d.%m %H:%M')} — {loc} | {dances}\n"
-        await query.edit_message_text(msg, reply_markup=get_main_menu(user_id))
-        return ConversationHandler.END
-
-    elif query.data == "delete_event":
-        events = get_upcoming_events(user_id)
-        if not events:
-            msg = "У тебя нет мероприятий для удаления."
+            if not events:
+                msg = "У тебя пока нет запланированных мероприятий."
+            else:
+                msg = "📌 Твои ближайшие мероприятия:\n\n"
+                for ev in events:
+                    dt = datetime.fromisoformat(ev[1])
+                    loc = ev[2] or "не указано"
+                    dances = ev[3] or "не указаны"
+                    msg += f"• {dt.strftime('%d.%m %H:%M')} — {loc} | {dances}\n"
+            
             await query.edit_message_text(msg, reply_markup=get_main_menu(user_id))
             return ConversationHandler.END
 
-        msg = "📌 Выбери событие для удаления:\n\n"
-        for i, ev in enumerate(events, 1):
-            dt = datetime.fromisoformat(ev[1])
-            loc = ev[2] or "не указано"
-            dances = ev[3] or "не указаны"
-            msg += f"{i}. {dt.strftime('%d.%m %H:%M')} — {loc} | {dances}\n"
+        elif query.data == "delete_event":
+            events = get_upcoming_events(user_id)
+            if not events:
+                msg = "У тебя нет мероприятий для удаления."
+                await query.edit_message_text(msg, reply_markup=get_main_menu(user_id))
+                return ConversationHandler.END
 
-        msg += "\n\nОтправь команду /delete N, где N — номер события."
-
-        await query.edit_message_text(msg, reply_markup=get_main_menu(user_id))
-        return ConversationHandler.END
-
-    elif query.data == "today":
-        events = get_today_events(user_id)
-        if not events:
-            msg = "Сегодня у тебя нет мероприятий 😊"
-        else:
-            msg = "🎉 Сегодня у тебя:\n\n"
-            for ev in events:
+            msg = "📌 Выбери событие для удаления:\n\n"
+            for i, ev in enumerate(events, 1):
                 dt = datetime.fromisoformat(ev[1])
                 loc = ev[2] or "не указано"
                 dances = ev[3] or "не указаны"
-                msg += f"• {dt.strftime('%H:%M')} — {loc} | {dances}\n"
+                msg += f"{i}. {dt.strftime('%d.%m %H:%M')} — {loc} | {dances}\n"
 
-        await query.edit_message_text(msg, reply_markup=get_main_menu(user_id))
-        return ConversationHandler.END
-
-    elif query.data == "debug":
-        # Проверяем права доступа
-        if not is_admin(user_id):
-            await query.edit_message_text("❌ У вас нет прав для выполнения этой команды.", reply_markup=get_main_menu(user_id))
-            return ConversationHandler.END
-            
-        events = get_all_events(user_id)
-
-        if not events:
-            await query.edit_message_text("В базе данных нет событий.", reply_markup=get_main_menu(user_id))
-        else:
-            msg = "🔧 Все события в БД:\n\n"
-            for ev in events:
-                dt = datetime.fromisoformat(ev[1])
-                loc = ev[2] or "не указано"
-                dances = ev[3] or "не указаны"
-                is_past = "⏰" if dt < datetime.now() else "✅"
-                msg += f"{is_past} {dt.strftime('%d.%m %H:%M')} — {loc} | {dances}\n"
+            msg += "\n\nОтправь команду /delete N, где N — номер события."
 
             await query.edit_message_text(msg, reply_markup=get_main_menu(user_id))
-        return ConversationHandler.END
-
-    elif query.data == "stats":
-        # Проверяем права доступа
-        if not is_admin(user_id):
-            await query.edit_message_text("❌ У вас нет прав для выполнения этой команды.", reply_markup=get_main_menu(user_id))
             return ConversationHandler.END
-            
-        try:
-            conn = sqlite3.connect("events.db", check_same_thread=False)
-            cursor = conn.cursor()
 
-            # Общая статистика
-            cursor.execute("SELECT COUNT(*) FROM events")
-            total_events = cursor.fetchone()[0]
+        elif query.data == "today":
+            events = get_today_events(user_id)
+            if not events:
+                msg = "Сегодня у тебя нет мероприятий 😊"
+            else:
+                msg = "🎉 Сегодня у тебя:\n\n"
+                for ev in events:
+                    dt = datetime.fromisoformat(ev[1])
+                    loc = ev[2] or "не указано"
+                    dances = ev[3] or "не указаны"
+                    msg += f"• {dt.strftime('%H:%M')} — {loc} | {dances}\n"
 
-            cursor.execute("SELECT COUNT(DISTINCT user_id) FROM events")
-            total_users = cursor.fetchone()[0]
-
-            cursor.execute("SELECT COUNT(*) FROM events WHERE event_datetime >= ?",
-                           (datetime.now().isoformat(),))
-            upcoming_events = cursor.fetchone()[0]
-
-            conn.close()
-
-            stats_msg = (
-                "📊 Статистика бота:\n\n"
-                f"• Всего событий: {total_events}\n"
-                f"• Предстоящих событий: {upcoming_events}\n"
-                f"• Уникальных пользователей: {total_users}\n"
-                f"• Админов: {len(ADMIN_IDS)}\n"
-            )
-
-            await query.edit_message_text(stats_msg, reply_markup=get_main_menu(user_id))
-
-        except Exception as e:
-            await query.edit_message_text(f"❌ Ошибка при получении статистики: {e}", reply_markup=get_main_menu(user_id))
-        return ConversationHandler.END
-
-    elif query.data == "backup":
-        # Проверяем права доступа
-        if not is_admin(user_id):
-            await query.edit_message_text("❌ У вас нет прав для выполнения этой команды.", reply_markup=get_main_menu(user_id))
+            await query.edit_message_text(msg, reply_markup=get_main_menu(user_id))
             return ConversationHandler.END
-            
-        backup_info = get_backup_info()
-        await query.edit_message_text(f"💾 {backup_info}", reply_markup=get_main_menu(user_id))
+
+        elif query.data == "debug":
+            # Проверяем права доступа
+            if not is_admin(user_id):
+                await query.edit_message_text("❌ У вас нет прав для выполнения этой команды.", 
+                                              reply_markup=get_main_menu(user_id))
+                return ConversationHandler.END
+                
+            events = get_all_events(user_id)
+
+            if not events:
+                await query.edit_message_text("В базе данных нет событий.", 
+                                              reply_markup=get_main_menu(user_id))
+            else:
+                msg = "🔧 Все события в БД:\n\n"
+                for ev in events:
+                    dt = datetime.fromisoformat(ev[1])
+                    loc = ev[2] or "не указано"
+                    dances = ev[3] or "не указаны"
+                    is_past = "⏰" if dt < datetime.now() else "✅"
+                    msg += f"{is_past} {dt.strftime('%d.%m %H:%M')} — {loc} | {dances}\n"
+
+                await query.edit_message_text(msg, reply_markup=get_main_menu(user_id))
+            return ConversationHandler.END
+
+        elif query.data == "stats":
+            # Проверяем права доступа
+            if not is_admin(user_id):
+                await query.edit_message_text("❌ У вас нет прав для выполнения этой команды.", 
+                                              reply_markup=get_main_menu(user_id))
+                return ConversationHandler.END
+                
+            try:
+                from database import get_connection
+                conn = get_connection()
+                cursor = conn.cursor()
+
+                # Общая статистика
+                if os.getenv('RENDER'):
+                    # PostgreSQL
+                    cursor.execute("SELECT COUNT(*) FROM events")
+                    total_events = cursor.fetchone()[0]
+
+                    cursor.execute("SELECT COUNT(DISTINCT user_id) FROM events")
+                    total_users = cursor.fetchone()[0]
+
+                    cursor.execute("SELECT COUNT(*) FROM events WHERE event_datetime >= %s", 
+                                   (datetime.now(),))
+                    upcoming_events = cursor.fetchone()[0]
+                else:
+                    # SQLite
+                    cursor.execute("SELECT COUNT(*) FROM events")
+                    total_events = cursor.fetchone()[0]
+
+                    cursor.execute("SELECT COUNT(DISTINCT user_id) FROM events")
+                    total_users = cursor.fetchone()[0]
+
+                    cursor.execute("SELECT COUNT(*) FROM events WHERE event_datetime >= ?",
+                                   (datetime.now().isoformat(),))
+                    upcoming_events = cursor.fetchone()[0]
+
+                conn.close()
+
+                db_type = "PostgreSQL" if os.getenv('RENDER') else "SQLite"
+                stats_msg = (
+                    "📊 Статистика бота:\n\n"
+                    f"• Всего событий: {total_events}\n"
+                    f"• Предстоящих событий: {upcoming_events}\n"
+                    f"• Уникальных пользователей: {total_users}\n"
+                    f"• Админов: {len(ADMIN_IDS)}\n"
+                    f"• База данных: {db_type}\n"
+                )
+
+                await query.edit_message_text(stats_msg, reply_markup=get_main_menu(user_id))
+
+            except Exception as e:
+                await query.edit_message_text(f"❌ Ошибка при получении статистики: {e}", 
+                                              reply_markup=get_main_menu(user_id))
+            return ConversationHandler.END
+
+    except Exception as e:
+        if "Message is not modified" not in str(e):
+            logger.error(f"Ошибка в button_handler: {e}")
+            await query.edit_message_text("❌ Произошла ошибка. Попробуйте снова.", 
+                                          reply_markup=get_main_menu(user_id))
         return ConversationHandler.END
 
 
@@ -342,7 +357,9 @@ async def confirm_or_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         success = add_event(user_id, data["datetime"], data["location"], data["dances"], data["raw_text"])
         if success:
-            await query.edit_message_text("✅ Отлично! Событие сохранено в календаре.", reply_markup=get_main_menu(user_id))
+            db_type = "PostgreSQL" if os.getenv('RENDER') else "SQLite"
+            message = f"✅ Отлично! Событие сохранено в календаре ({db_type})."
+            await query.edit_message_text(message, reply_markup=get_main_menu(user_id))
         else:
             await query.edit_message_text("❌ Ошибка при сохранении события.", reply_markup=get_main_menu(user_id))
         # Очищаем временные данные
@@ -464,8 +481,9 @@ async def delete_event_command(update: Update, context: ContextTypes.DEFAULT_TYP
     event_id = events[event_num - 1][0]  # id события
     delete_event(event_id)
 
+    db_type = "PostgreSQL" if os.getenv('RENDER') else "SQLite"
     await update.message.reply_text(
-        f"✅ Событие №{event_num} удалено!",
+        f"✅ Событие №{event_num} удалено из {db_type}!",
         reply_markup=get_main_menu(user_id)
     )
 
@@ -503,77 +521,50 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        conn = sqlite3.connect("events.db", check_same_thread=False)
+        from database import get_connection
+        conn = get_connection()
         cursor = conn.cursor()
 
         # Общая статистика
-        cursor.execute("SELECT COUNT(*) FROM events")
-        total_events = cursor.fetchone()[0]
+        if os.getenv('RENDER'):
+            # PostgreSQL
+            cursor.execute("SELECT COUNT(*) FROM events")
+            total_events = cursor.fetchone()[0]
 
-        cursor.execute("SELECT COUNT(DISTINCT user_id) FROM events")
-        total_users = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(DISTINCT user_id) FROM events")
+            total_users = cursor.fetchone()[0]
 
-        cursor.execute("SELECT COUNT(*) FROM events WHERE event_datetime >= ?",
-                       (datetime.now().isoformat(),))
-        upcoming_events = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM events WHERE event_datetime >= %s",
+                           (datetime.now(),))
+            upcoming_events = cursor.fetchone()[0]
+        else:
+            # SQLite
+            cursor.execute("SELECT COUNT(*) FROM events")
+            total_events = cursor.fetchone()[0]
+
+            cursor.execute("SELECT COUNT(DISTINCT user_id) FROM events")
+            total_users = cursor.fetchone()[0]
+
+            cursor.execute("SELECT COUNT(*) FROM events WHERE event_datetime >= ?",
+                           (datetime.now().isoformat(),))
+            upcoming_events = cursor.fetchone()[0]
 
         conn.close()
 
+        db_type = "PostgreSQL" if os.getenv('RENDER') else "SQLite"
         stats_msg = (
             "📊 Статистика бота:\n\n"
             f"• Всего событий: {total_events}\n"
             f"• Предстоящих событий: {upcoming_events}\n"
             f"• Уникальных пользователей: {total_users}\n"
             f"• Админов: {len(ADMIN_IDS)}\n"
+            f"• База данных: {db_type}\n"
         )
 
         await update.message.reply_text(stats_msg)
 
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка при получении статистики: {e}")
-
-
-async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Создание резервной копии (только для админов)"""
-    user_id = update.effective_user.id
-
-    if not is_admin(user_id):
-        await update.message.reply_text("❌ У вас нет прав для выполнения этой команды.")
-        return
-
-    success = backup_events()
-    if success:
-        backup_info = get_backup_info()
-        await update.message.reply_text(f"✅ {backup_info}")
-    else:
-        await update.message.reply_text("❌ Не удалось создать резервную копию")
-
-
-async def restore_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Восстановление из резервной копии (только для админов)"""
-    user_id = update.effective_user.id
-
-    if not is_admin(user_id):
-        await update.message.reply_text("❌ У вас нет прав для выполнения этой команды.")
-        return
-
-    success = restore_events()
-    if success:
-        await update.message.reply_text("✅ Данные восстановлены из резервной копии")
-    else:
-        await update.message.reply_text("❌ Не удалось восстановить данные")
-
-
-async def backup_info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Информация о резервной копии (только для админов)"""
-    user_id = update.effective_user.id
-
-    if not is_admin(user_id):
-        await update.message.reply_text("❌ У вас нет прав для выполнения этой команды.")
-        return
-
-    backup_info = get_backup_info()
-    await update.message.reply_text(f"📊 {backup_info}")
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -615,36 +606,45 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик ошибок"""
+    error = context.error
+    
+    # Игнорируем ошибку "Message is not modified"
+    if hasattr(error, 'message') and "Message is not modified" in str(error):
+        return
+    
+    # Логируем все остальные ошибки
     logger.error(f"Ошибка: {context.error}", exc_info=context.error)
 
 
 def main():
-    # Просто инициализируем базу
+    # Инициализация базы данных с задержкой
+    print("🔄 Инициализация базы данных...")
     init_db()
     
-    print("✅ База данных инициализирована")
+    # Даем время на создание таблиц в PostgreSQL
+    time.sleep(3)
+    
+    print("✅ База данных готова")
 
-    # Создаем Application с JobQueue
+    # Создаем Application
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # Добавляем job для напоминаний (проверка каждые 30 минут)
+    # Добавляем job для напоминаний с задержкой
     job_queue = application.job_queue
     
     # Проверяем, что JobQueue доступен
     if job_queue:
-        job_queue.run_repeating(send_daily_reminders, interval=1800, first=10)  # 1800 сек = 30 минут
-        job_queue.run_repeating(periodic_backup, interval=21600, first=60)  # 6 часов
-        print("🔔 Система напоминаний активирована")
-        print("💾 Периодическое резервное копирование активировано")
+        # Запускаем первую проверку через 10 секунд после старта
+        job_queue.run_repeating(send_daily_reminders, interval=1800, first=10)
+        print("🔔 Система напоминаний активирована (с задержкой)")
     else:
         print("⚠️  JobQueue недоступен. Напоминания отключены.")
-        print("💡 Установите: pip install 'python-telegram-bot[job-queue]'")
 
     # Обработчик диалога
     conv_handler = ConversationHandler(
         entry_points=[
             MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message),
-            CommandHandler("add", handle_message)  # Добавляем команду /add как entry point
+            CommandHandler("add", handle_message)
         ],
         states={
             AWAITING_CONFIRMATION: [
@@ -673,9 +673,6 @@ def main():
     application.add_handler(CommandHandler("delete", delete_event_command))
     application.add_handler(CommandHandler("debug", debug_command))
     application.add_handler(CommandHandler("stats", stats_command))
-    application.add_handler(CommandHandler("backup", backup_command))
-    application.add_handler(CommandHandler("restore", restore_command))
-    application.add_handler(CommandHandler("backupinfo", backup_info_command))
     application.add_handler(CommandHandler("cancel", cancel_command))
     application.add_handler(CallbackQueryHandler(button_handler))
 
@@ -683,10 +680,10 @@ def main():
     application.add_error_handler(error_handler)
 
     # Запускаем бота
-    print("✅ Бот запущен с системой прав!")
+    print("✅ Бот запущен!")
     print(f"👑 Админы: {ADMIN_IDS}")
     print("🛡️  Защита от дубликатов включена")
-    print("💾 Система резервного копирования активна")
+    print("💾 PostgreSQL база данных активна")
 
     # Для Render - используем webhook
     if os.getenv('RENDER'):
@@ -698,13 +695,9 @@ def main():
             webhook_url=webhook_url
         )
     else:
-        # Для PythonAnywhere - polling
+        # Для локальной разработки - polling
         application.run_polling()
 
 
 if __name__ == "__main__":
     main()
-
-
-
-
