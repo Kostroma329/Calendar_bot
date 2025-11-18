@@ -3,6 +3,7 @@ import logging
 import sqlite3
 import os
 import time
+import asyncio
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
@@ -11,7 +12,7 @@ from telegram.ext import (
 )
 
 from config import BOT_TOKEN
-from database import init_db, add_event, delete_event, event_exists
+from database import init_db, add_event, delete_event, event_exists, get_event_by_id, get_all_users
 from database import get_upcoming_events_all, get_today_events_all, get_all_events
 from parser import extract_with_spacy
 from admin import is_admin, get_admin_commands, get_user_commands, ADMIN_IDS
@@ -127,7 +128,10 @@ def get_main_menu(user_id=None):
     # Только админы видят дополнительные кнопки
     if user_id and is_admin(user_id):
         keyboard.extend([
-            [InlineKeyboardButton("🗑️ Удалить событие", callback_data="delete_event")]
+            [InlineKeyboardButton("📢 Рассылка напоминаний", callback_data="broadcast")],
+            [InlineKeyboardButton("🗑️ Удалить событие", callback_data="delete_event")],
+            [InlineKeyboardButton("🔧 Отладка", callback_data="debug")],
+            [InlineKeyboardButton("📊 Статистика", callback_data="stats")]
         ])
     
     return InlineKeyboardMarkup(keyboard)
@@ -313,12 +317,260 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                               reply_markup=get_main_menu(user_id))
             return ConversationHandler.END
 
+        elif query.data == "broadcast":
+            # Только для админов
+            if not is_admin(user_id):
+                await query.edit_message_text("❌ У вас нет прав для рассылки.", 
+                                              reply_markup=get_main_menu(user_id))
+                return ConversationHandler.END
+            
+            # Запускаем процесс рассылки
+            events = get_upcoming_events_all()
+            
+            if not events:
+                await query.edit_message_text("❌ Нет мероприятий для рассылки.", 
+                                              reply_markup=get_main_menu(user_id))
+                return ConversationHandler.END
+
+            # Создаем клавиатуру с событиями
+            keyboard = []
+            for i, event in enumerate(events, 1):
+                dt = datetime.fromisoformat(event[1])
+                dt_moscow = convert_to_moscow_time(dt)
+                loc = event[2] or "не указано"
+                dances = event[3] or "не указаны"
+                
+                button_text = f"{i}. {dt_moscow.strftime('%d.%m %H:%M')} - {loc}"
+                if len(button_text) > 40:
+                    button_text = button_text[:37] + "..."
+                
+                keyboard.append([InlineKeyboardButton(button_text, callback_data=f"broadcast_{event[0]}")])
+            
+            keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel_broadcast")])
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await query.edit_message_text(
+                "📢 Выберите мероприятие для рассылки напоминания всем пользователям:",
+                reply_markup=reply_markup
+            )
+            return ConversationHandler.END
+
+        # Обработка отмены рассылки
+        elif query.data == "cancel_broadcast":
+            await query.edit_message_text("❌ Рассылка отменена.", reply_markup=get_main_menu(user_id))
+            return ConversationHandler.END
+
     except Exception as e:
         if "Message is not modified" not in str(e):
             logger.error(f"Ошибка в button_handler: {e}")
             await query.edit_message_text("❌ Произошла ошибка. Попробуйте снова.", 
                                           reply_markup=get_main_menu(user_id))
         return ConversationHandler.END
+
+
+async def handle_broadcast_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка выбора события для рассылки"""
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+
+    if not is_admin(user_id):
+        await query.edit_message_text("❌ У вас нет прав для этой операции.")
+        return
+
+    if query.data == "cancel_broadcast":
+        await query.edit_message_text("❌ Рассылка отменена.", reply_markup=get_main_menu(user_id))
+        return
+
+    if query.data.startswith("broadcast_"):
+        event_id = int(query.data.split("_")[1])
+        
+        # Получаем информацию о событии
+        event = get_event_by_id(event_id)
+        if not event:
+            await query.edit_message_text("❌ Событие не найдено.", reply_markup=get_main_menu(user_id))
+            return
+
+        # Сохраняем event_id в context для использования в следующем шаге
+        context.user_data["broadcast_event_id"] = event_id
+        
+        # Показываем подтверждение
+        dt = datetime.fromisoformat(event[1])
+        dt_moscow = convert_to_moscow_time(dt)
+        loc = event[2] or "не указано"
+        dances = event[3] or "не указаны"
+        
+        confirmation_text = (
+            "📢 Подтвердите рассылку:\n\n"
+            f"📅 {dt_moscow.strftime('%d.%m.%Y в %H:%M')}\n"
+            f"📍 {loc}\n"
+            f"💃 {dances}\n\n"
+            "Отправить напоминание ВСЕМ пользователям?"
+        )
+        
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Да, отправить всем", callback_data="confirm_broadcast"),
+                InlineKeyboardButton("❌ Отмена", callback_data="cancel_broadcast")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(confirmation_text, reply_markup=reply_markup)
+
+
+async def execute_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Выполнение рассылки напоминания"""
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+
+    if not is_admin(user_id):
+        await query.edit_message_text("❌ У вас нет прав для этой операции.")
+        return
+
+    if query.data != "confirm_broadcast":
+        await query.edit_message_text("❌ Рассылка отменена.", reply_markup=get_main_menu(user_id))
+        return
+
+    event_id = context.user_data.get("broadcast_event_id")
+    if not event_id:
+        await query.edit_message_text("❌ Ошибка: событие не найдено.", reply_markup=get_main_menu(user_id))
+        return
+
+    # Получаем информацию о событии
+    event = get_event_by_id(event_id)
+    if not event:
+        await query.edit_message_text("❌ Событие не найдено.", reply_markup=get_main_menu(user_id))
+        return
+
+    # Получаем всех уникальных пользователей
+    all_users = get_all_users()
+    
+    if not all_users:
+        await query.edit_message_text("❌ Нет пользователей для рассылки.", reply_markup=get_main_menu(user_id))
+        return
+
+    dt = datetime.fromisoformat(event[1])
+    dt_moscow = convert_to_moscow_time(dt)
+    loc = event[2] or "не указано"
+    dances = event[3] or "не указаны"
+
+    # Формируем сообщение
+    message = (
+        "🔔 Напоминание от администратора!\n\n"
+        f"📅 {dt_moscow.strftime('%d.%m.%Y в %H:%M')}\n"
+        f"📍 {loc}\n"
+        f"💃 {dances}\n\n"
+        "Не забудьте подготовиться! 🕺💃"
+    )
+
+    # Отправляем сообщение всем пользователям
+    success_count = 0
+    fail_count = 0
+    
+    await query.edit_message_text("🔄 Начинаю рассылку...")
+    
+    for user in all_users:
+        try:
+            await context.bot.send_message(chat_id=user, text=message)
+            success_count += 1
+            # Небольшая задержка чтобы не превысить лимиты Telegram
+            await asyncio.sleep(0.1)
+        except Exception as e:
+            logger.error(f"Не удалось отправить сообщение пользователю {user}: {e}")
+            fail_count += 1
+
+    # Отчет о рассылке
+    report_text = (
+        f"✅ Рассылка завершена!\n\n"
+        f"📊 Статистика:\n"
+        f"• Успешно отправлено: {success_count}\n"
+        f"• Не удалось отправить: {fail_count}\n"
+        f"• Всего пользователей: {len(all_users)}"
+    )
+    
+    await query.edit_message_text(report_text, reply_markup=get_main_menu(user_id))
+    
+    # Очищаем временные данные
+    context.user_data.pop("broadcast_event_id", None)
+
+
+async def send_instant_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Мгновенная отправка напоминания о конкретном мероприятии (только для админов)"""
+    user_id = update.effective_user.id
+    
+    if not is_admin(user_id):
+        await update.message.reply_text("❌ У вас нет прав для этой команды.")
+        return
+
+    args = context.args
+    if not args or not args[0].isdigit():
+        await update.message.reply_text(
+            "❌ Используйте: /remind N\n"
+            "где N - номер события из списка (/debug или кнопка 'Все мероприятия')\n\n"
+            "Пример: /remind 1"
+        )
+        return
+
+    event_num = int(args[0])
+    events = get_upcoming_events_all()
+
+    if event_num < 1 or event_num > len(events):
+        await update.message.reply_text(f"❌ Нет события с номером {event_num}.")
+        return
+
+    event = events[event_num - 1]
+    event_id = event[0]
+    
+    # Получаем всех пользователей
+    all_users = get_all_users()
+    
+    if not all_users:
+        await update.message.reply_text("❌ Нет пользователей для рассылки.")
+        return
+
+    dt = datetime.fromisoformat(event[1])
+    dt_moscow = convert_to_moscow_time(dt)
+    loc = event[2] or "не указано"
+    dances = event[3] or "не указаны"
+
+    # Формируем сообщение
+    message = (
+        "🔔 Срочное напоминание!\n\n"
+        f"📅 {dt_moscow.strftime('%d.%m.%Y в %H:%M')}\n"
+        f"📍 {loc}\n"
+        f"💃 {dances}\n\n"
+        "Успейте подготовиться! 🕺💃"
+    )
+
+    # Отправляем сообщение всем пользователям
+    success_count = 0
+    fail_count = 0
+    
+    progress_msg = await update.message.reply_text("🔄 Начинаю рассылку...")
+
+    for user in all_users:
+        try:
+            await context.bot.send_message(chat_id=user, text=message)
+            success_count += 1
+            # Небольшая задержка чтобы не превысить лимиты Telegram
+            await asyncio.sleep(0.1)
+        except Exception as e:
+            logger.error(f"Не удалось отправить сообщение пользователю {user}: {e}")
+            fail_count += 1
+
+    # Отчет о рассылке
+    report_text = (
+        f"✅ Рассылка завершена!\n\n"
+        f"📊 Статистика:\n"
+        f"• Успешно отправлено: {success_count}\n"
+        f"• Не удалось отправить: {fail_count}\n"
+        f"• Всего пользователей: {len(all_users)}"
+    )
+    
+    await progress_msg.edit_text(report_text)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -663,251 +915,6 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return ConversationHandler.END
 
-async def broadcast_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Рассылка напоминания о мероприятии всем пользователям (только для админов)"""
-    user_id = update.effective_user.id
-    
-    if not is_admin(user_id):
-        await update.message.reply_text("❌ У вас нет прав для этой команды.")
-        return
-
-    # Получаем список всех событий
-    events = get_upcoming_events_all()
-    
-    if not events:
-        await update.message.reply_text("❌ Нет предстоящих мероприятий для рассылки.")
-        return
-
-    # Создаем клавиатуру с событиями
-    keyboard = []
-    for i, event in enumerate(events, 1):
-        dt = datetime.fromisoformat(event[1])
-        dt_moscow = convert_to_moscow_time(dt)
-        loc = event[2] or "не указано"
-        dances = event[3] or "не указаны"
-        
-        button_text = f"{i}. {dt_moscow.strftime('%d.%m %H:%M')} - {loc}"
-        # Обрезаем длинный текст для кнопки
-        if len(button_text) > 40:
-            button_text = button_text[:37] + "..."
-        
-        keyboard.append([InlineKeyboardButton(button_text, callback_data=f"broadcast_{event[0]}")])
-    
-    keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel_broadcast")])
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
-        "📢 Выберите мероприятие для рассылки напоминания всем пользователям:",
-        reply_markup=reply_markup
-    )
-
-
-async def handle_broadcast_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка выбора события для рассылки"""
-    query = update.callback_query
-    await query.answer()
-    user_id = update.effective_user.id
-
-    if not is_admin(user_id):
-        await query.edit_message_text("❌ У вас нет прав для этой операции.")
-        return
-
-    if query.data == "cancel_broadcast":
-        await query.edit_message_text("❌ Рассылка отменена.", reply_markup=get_main_menu(user_id))
-        return
-
-    if query.data.startswith("broadcast_"):
-        event_id = int(query.data.split("_")[1])
-        
-        # Получаем информацию о событии
-        event = get_event_by_id(event_id)
-        if not event:
-            await query.edit_message_text("❌ Событие не найдено.", reply_markup=get_main_menu(user_id))
-            return
-
-        # Сохраняем event_id в context для использования в следующем шаге
-        context.user_data["broadcast_event_id"] = event_id
-        
-        # Показываем подтверждение
-        dt = datetime.fromisoformat(event[1])
-        dt_moscow = convert_to_moscow_time(dt)
-        loc = event[2] or "не указано"
-        dances = event[3] or "не указаны"
-        
-        confirmation_text = (
-            "📢 Подтвердите рассылку:\n\n"
-            f"📅 {dt_moscow.strftime('%d.%m.%Y в %H:%M')}\n"
-            f"📍 {loc}\n"
-            f"💃 {dances}\n\n"
-            "Отправить напоминание ВСЕМ пользователям?"
-        )
-        
-        keyboard = [
-            [
-                InlineKeyboardButton("✅ Да, отправить всем", callback_data="confirm_broadcast"),
-                InlineKeyboardButton("❌ Отмена", callback_data="cancel_broadcast")
-            ]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.edit_message_text(confirmation_text, reply_markup=reply_markup)
-
-
-async def execute_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Выполнение рассылки напоминания"""
-    query = update.callback_query
-    await query.answer()
-    user_id = update.effective_user.id
-
-    if not is_admin(user_id):
-        await query.edit_message_text("❌ У вас нет прав для этой операции.")
-        return
-
-    if query.data != "confirm_broadcast":
-        await query.edit_message_text("❌ Рассылка отменена.", reply_markup=get_main_menu(user_id))
-        return
-
-    event_id = context.user_data.get("broadcast_event_id")
-    if not event_id:
-        await query.edit_message_text("❌ Ошибка: событие не найдено.", reply_markup=get_main_menu(user_id))
-        return
-
-    # Получаем информацию о событии
-    event = get_event_by_id(event_id)
-    if not event:
-        await query.edit_message_text("❌ Событие не найдено.", reply_markup=get_main_menu(user_id))
-        return
-
-    # Получаем всех уникальных пользователей
-    from database import get_all_users
-    all_users = get_all_users()
-    
-    if not all_users:
-        await query.edit_message_text("❌ Нет пользователей для рассылки.", reply_markup=get_main_menu(user_id))
-        return
-
-    dt = datetime.fromisoformat(event[1])
-    dt_moscow = convert_to_moscow_time(dt)
-    loc = event[2] or "не указано"
-    dances = event[3] or "не указаны"
-
-    # Формируем сообщение
-    message = (
-        "🔔 Напоминание от администратора!\n\n"
-        f"📅 {dt_moscow.strftime('%d.%m.%Y в %H:%M')}\n"
-        f"📍 {loc}\n"
-        f"💃 {dances}\n\n"
-        "Не забудьте подготовиться! 🕺💃"
-    )
-
-    # Отправляем сообщение всем пользователям
-    success_count = 0
-    fail_count = 0
-    
-    await query.edit_message_text("🔄 Начинаю рассылку...")
-    
-    for user in all_users:
-        try:
-            await context.bot.send_message(chat_id=user, text=message)
-            success_count += 1
-            # Небольшая задержка чтобы не превысить лимиты Telegram
-            await asyncio.sleep(0.1)
-        except Exception as e:
-            logger.error(f"Не удалось отправить сообщение пользователю {user}: {e}")
-            fail_count += 1
-
-    # Отчет о рассылке
-    report_text = (
-        f"✅ Рассылка завершена!\n\n"
-        f"📊 Статистика:\n"
-        f"• Успешно отправлено: {success_count}\n"
-        f"• Не удалось отправить: {fail_count}\n"
-        f"• Всего пользователей: {len(all_users)}"
-    )
-    
-    await query.edit_message_text(report_text, reply_markup=get_main_menu(user_id))
-    
-    # Очищаем временные данные
-    context.user_data.pop("broadcast_event_id", None)
-
-
-async def send_instant_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Мгновенная отправка напоминания о конкретном мероприятии (только для админов)"""
-    user_id = update.effective_user.id
-    
-    if not is_admin(user_id):
-        await update.message.reply_text("❌ У вас нет прав для этой команды.")
-        return
-
-    args = context.args
-    if not args or not args[0].isdigit():
-        await update.message.reply_text(
-            "❌ Используйте: /remind N\n"
-            "где N - номер события из списка (/debug или кнопка 'Все мероприятия')\n\n"
-            "Пример: /remind 1"
-        )
-        return
-
-    event_num = int(args[0])
-    events = get_upcoming_events_all()
-
-    if event_num < 1 or event_num > len(events):
-        await update.message.reply_text(f"❌ Нет события с номером {event_num}.")
-        return
-
-    event = events[event_num - 1]
-    event_id = event[0]
-    
-    # Получаем всех пользователей
-    from database import get_all_users
-    all_users = get_all_users()
-    
-    if not all_users:
-        await update.message.reply_text("❌ Нет пользователей для рассылки.")
-        return
-
-    dt = datetime.fromisoformat(event[1])
-    dt_moscow = convert_to_moscow_time(dt)
-    loc = event[2] or "не указано"
-    dances = event[3] or "не указаны"
-
-    # Формируем сообщение
-    message = (
-        "🔔 Срочное напоминание!\n\n"
-        f"📅 {dt_moscow.strftime('%d.%m.%Y в %H:%M')}\n"
-        f"📍 {loc}\n"
-        f"💃 {dances}\n\n"
-        "Успейте подготовиться! 🕺💃"
-    )
-
-    # Отправляем сообщение всем пользователям
-    success_count = 0
-    fail_count = 0
-    
-    progress_msg = await update.message.reply_text("🔄 Начинаю рассылку...")
-
-    for user in all_users:
-        try:
-            await context.bot.send_message(chat_id=user, text=message)
-            success_count += 1
-            # Небольшая задержка чтобы не превысить лимиты Telegram
-            await asyncio.sleep(0.1)
-        except Exception as e:
-            logger.error(f"Не удалось отправить сообщение пользователю {user}: {e}")
-            fail_count += 1
-
-    # Отчет о рассылке
-    report_text = (
-        f"✅ Рассылка завершена!\n\n"
-        f"📊 Статистика:\n"
-        f"• Успешно отправлено: {success_count}\n"
-        f"• Не удалось отправить: {fail_count}\n"
-        f"• Всего пользователей: {len(all_users)}"
-    )
-    
-    await progress_msg.edit_text(report_text)
-
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик ошибок"""
@@ -942,9 +949,10 @@ def main():
     if job_queue:
         # Запускаем первую проверку через 10 секунд после старта
         job_queue.run_repeating(send_daily_reminders, interval=1800, first=10)
-        print("🔔 Система напоминаний активирована (с задержкой)")
+        print("🔔 Система напоминаний активирована")
+        print("⏰ Интервал проверки: каждые 30 минут")
     else:
-        print("⚠️  JobQueue недоступен. Напоминания отключены.")
+        print("❌ JobQueue недоступен. Напоминания отключены.")
 
     # Обработчик диалога
     conv_handler = ConversationHandler(
@@ -980,7 +988,12 @@ def main():
     application.add_handler(CommandHandler("debug", debug_command))
     application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(CommandHandler("cancel", cancel_command))
+    application.add_handler(CommandHandler("broadcast", send_instant_reminder))
+    application.add_handler(CommandHandler("remind", send_instant_reminder))
     application.add_handler(CallbackQueryHandler(button_handler))
+    application.add_handler(CallbackQueryHandler(handle_broadcast_selection, pattern="^broadcast_"))
+    application.add_handler(CallbackQueryHandler(handle_broadcast_selection, pattern="^cancel_broadcast$"))
+    application.add_handler(CallbackQueryHandler(execute_broadcast, pattern="^confirm_broadcast$"))
 
     # Добавляем обработчик ошибок
     application.add_error_handler(error_handler)
@@ -988,8 +1001,7 @@ def main():
     # Запускаем бота
     print("✅ Бот запущен!")
     print(f"👑 Админы: {ADMIN_IDS}")
-    print("🛡️  Защита от дубликатов включена")
-    print("💾 Общая база данных активна")
+    print("📢 Функция рассылки активирована")
 
     # Для Render - используем webhook
     if os.getenv('RENDER'):
@@ -1007,4 +1019,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
