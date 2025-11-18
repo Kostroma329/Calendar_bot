@@ -2,6 +2,9 @@
 import logging
 import sqlite3
 import os
+import atexit
+import signal
+import sys
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
@@ -15,23 +18,6 @@ from database import backup_events, restore_events, get_backup_info
 from parser import extract_with_spacy
 from admin import is_admin, get_admin_commands, get_user_commands, ADMIN_IDS
 
-def backup_on_exit():
-    """Создание резервной копии при завершении работы"""
-    print("\n💾 Создание резервной копии перед выходом...")
-    backup_events()
-
-# Регистрируем функцию для вызова при завершении
-atexit.register(backup_on_exit)
-
-# Также обрабатываем сигналы завершения
-def signal_handler(signum, frame):
-    print(f"\n💾 Создание резервной копии по сигналу {signum}...")
-    backup_events()
-    sys.exit(0)
-
-signal.signal(signal.SIGINT, signal_handler)
-signal.signal(signal.SIGTERM, signal_handler)
-
 # Настройка логирования
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -41,6 +27,18 @@ logger = logging.getLogger(__name__)
 
 # Состояния
 AWAITING_CONFIRMATION, AWAITING_LOCATION, AWAITING_DANCES = 1, 2, 3
+
+
+def backup_on_exit():
+    """Создание резервной копии при завершении работы"""
+    print("\n💾 Создание резервной копии перед выходом...")
+    backup_events()
+
+def signal_handler(signum, frame):
+    """Обработчик сигналов завершения"""
+    print(f"\n💾 Создание резервной копии по сигналу {signum}...")
+    backup_events()
+    sys.exit(0)
 
 
 async def send_daily_reminders(context: ContextTypes.DEFAULT_TYPE):
@@ -83,6 +81,12 @@ async def send_daily_reminders(context: ContextTypes.DEFAULT_TYPE):
         
     except Exception as e:
         logger.error(f"Ошибка в send_daily_reminders: {e}")
+
+
+async def periodic_backup(context: ContextTypes.DEFAULT_TYPE):
+    """Периодическое резервное копирование каждые 6 часов"""
+    print("🕒 Периодическое резервное копирование...")
+    backup_events()
 
 
 def get_main_menu(user_id=None):
@@ -615,7 +619,8 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
-   atexit.register(backup_on_exit)
+    # Регистрируем обработчики завершения
+    atexit.register(backup_on_exit)
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
@@ -646,7 +651,9 @@ def main():
     # Проверяем, что JobQueue доступен
     if job_queue:
         job_queue.run_repeating(send_daily_reminders, interval=1800, first=10)  # 1800 сек = 30 минут
+        job_queue.run_repeating(periodic_backup, interval=21600, first=60)  # 6 часов
         print("🔔 Система напоминаний активирована")
+        print("💾 Периодическое резервное копирование активировано")
     else:
         print("⚠️  JobQueue недоступен. Напоминания отключены.")
         print("💡 Установите: pip install 'python-telegram-bot[job-queue]'")
@@ -715,6 +722,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
