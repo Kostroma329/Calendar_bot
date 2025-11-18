@@ -637,7 +637,15 @@ def main():
     init_db()
     
     # 3. Создаем начальную резервную копию (если база не пустая)
-    events_count = len(get_all_events(ADMIN_IDS[0] if ADMIN_IDS else 0))
+     try:
+        conn = sqlite3.connect("events.db", check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM events")
+        events_count = cursor.fetchone()[0]
+        conn.close()
+    except:
+        events_count = 0
+        
     if events_count > 0:
         print(f"💾 Создание резервной копии ({events_count} событий)...")
         backup_events()
@@ -722,3 +730,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
