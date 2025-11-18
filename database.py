@@ -24,6 +24,33 @@ def init_db():
     conn.close()
     print("✅ База данных инициализирована")
 
+def event_exists(user_id, event_datetime, location, dances):
+    """Проверяет, существует ли уже такое событие"""
+    try:
+        conn = sqlite3.connect("events.db", check_same_thread=False)
+        cursor = conn.cursor()
+        
+        # Преобразуем список танцев в строку для сравнения
+        dances_str = ", ".join(dances) if dances else None
+        
+        # Ищем события с тем же пользователем, временем и местом
+        cursor.execute('''
+            SELECT COUNT(*) FROM events 
+            WHERE user_id = ? 
+            AND event_datetime = ? 
+            AND location = ?
+            AND dances = ?
+        ''', (user_id, event_datetime.isoformat(), location, dances_str))
+        
+        count = cursor.fetchone()[0]
+        conn.close()
+        
+        return count > 0
+        
+    except Exception as e:
+        print(f"❌ Ошибка при проверке события: {e}")
+        return False
+
 def add_event(user_id, event_datetime, location, dances, raw_text):
     """Добавление события в базу данных"""
     try:
