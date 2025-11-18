@@ -12,8 +12,8 @@ from telegram.ext import (
 )
 
 from config import BOT_TOKEN
-from database import init_db, add_event, delete_event, event_exists, get_event_by_id, get_all_users
-from database import get_upcoming_events_all, get_today_events_all, get_all_events
+from database import init_db, add_event, delete_event, event_exists, get_event_by_id, get_all_bot_users, add_bot_user
+from database import get_upcoming_events_all, get_today_events_all, get_all_events, get_bot_users_stats
 from parser import extract_with_spacy
 from admin import is_admin, get_admin_commands, get_user_commands, ADMIN_IDS
 
@@ -129,9 +129,6 @@ def get_main_menu(user_id=None):
     if user_id and is_admin(user_id):
         keyboard.extend([
             [InlineKeyboardButton("📢 Рассылка напоминаний", callback_data="broadcast")],
-            [InlineKeyboardButton("🗑️ Удалить событие", callback_data="delete_event")],
-            [InlineKeyboardButton("🔧 Отладка", callback_data="debug")],
-            [InlineKeyboardButton("📊 Статистика", callback_data="stats")]
         ])
     
     return InlineKeyboardMarkup(keyboard)
@@ -139,6 +136,15 @@ def get_main_menu(user_id=None):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    user = update.effective_user
+    
+    # Добавляем/обновляем пользователя в базе
+    add_bot_user(
+        user_id=user_id,
+        username=user.username,
+        first_name=user.first_name,
+        last_name=user.last_name
+    )
 
     # Приветственное сообщение с учетом прав
     if is_admin(user_id):
@@ -269,6 +275,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return ConversationHandler.END
                 
             try:
+                total_events = 0
+                users_with_events = 0
+                upcoming_events = 0
+                
                 from database import get_connection
                 conn = get_connection()
                 cursor = conn.cursor()
@@ -280,7 +290,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     total_events = cursor.fetchone()[0]
 
                     cursor.execute("SELECT COUNT(DISTINCT user_id) FROM events")
-                    total_users = cursor.fetchone()[0]
+                    users_with_events = cursor.fetchone()[0]
 
                     cursor.execute("SELECT COUNT(*) FROM events WHERE event_datetime >= %s", 
                                    (datetime.now(),))
@@ -291,7 +301,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     total_events = cursor.fetchone()[0]
 
                     cursor.execute("SELECT COUNT(DISTINCT user_id) FROM events")
-                    total_users = cursor.fetchone()[0]
+                    users_with_events = cursor.fetchone()[0]
 
                     cursor.execute("SELECT COUNT(*) FROM events WHERE event_datetime >= ?",
                                    (datetime.now().isoformat(),))
@@ -299,12 +309,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 conn.close()
 
+                # Статистика пользователей бота
+                total_bot_users, active_bot_users = get_bot_users_stats()
+
                 db_type = "PostgreSQL" if os.getenv('RENDER') else "SQLite"
                 stats_msg = (
                     "📊 Статистика бота:\n\n"
                     f"• Всего событий: {total_events}\n"
                     f"• Предстоящих событий: {upcoming_events}\n"
-                    f"• Уникальных пользователей: {total_users}\n"
+                    f"• Пользователей с событиями: {users_with_events}\n"
+                    f"• Всего пользователей бота: {total_bot_users}\n"
+                    f"• Активных пользователей (30 дней): {active_bot_users}\n"
                     f"• Админов: {len(ADMIN_IDS)}\n"
                     f"• База данных: {db_type}\n"
                     f"• Часовой пояс: Москва (UTC+3)\n"
@@ -406,7 +421,7 @@ async def handle_broadcast_selection(update: Update, context: ContextTypes.DEFAU
             f"📅 {dt_moscow.strftime('%d.%m.%Y в %H:%M')}\n"
             f"📍 {loc}\n"
             f"💃 {dances}\n\n"
-            "Отправить напоминание ВСЕМ пользователям?"
+            "Отправить напоминание ВСЕМ пользователям бота?"
         )
         
         keyboard = [
@@ -421,7 +436,7 @@ async def handle_broadcast_selection(update: Update, context: ContextTypes.DEFAU
 
 
 async def execute_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Выполнение рассылки напоминания"""
+    """Выполнение рассылки напоминания всем пользователям бота"""
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
@@ -445,10 +460,10 @@ async def execute_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ Событие не найдено.", reply_markup=get_main_menu(user_id))
         return
 
-    # Получаем всех уникальных пользователей
-    all_users = get_all_users()
+    # Получаем ВСЕХ пользователей бота
+    all_bot_users = get_all_bot_users()
     
-    if not all_users:
+    if not all_bot_users:
         await query.edit_message_text("❌ Нет пользователей для рассылки.", reply_markup=get_main_menu(user_id))
         return
 
@@ -466,13 +481,13 @@ async def execute_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Не забудьте подготовиться! 🕺💃"
     )
 
-    # Отправляем сообщение всем пользователям
+    # Отправляем сообщение всем пользователям бота
     success_count = 0
     fail_count = 0
     
-    await query.edit_message_text("🔄 Начинаю рассылку...")
+    await query.edit_message_text(f"🔄 Начинаю рассылку для {len(all_bot_users)} пользователей...")
     
-    for user in all_users:
+    for user in all_bot_users:
         try:
             await context.bot.send_message(chat_id=user, text=message)
             success_count += 1
@@ -488,7 +503,7 @@ async def execute_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📊 Статистика:\n"
         f"• Успешно отправлено: {success_count}\n"
         f"• Не удалось отправить: {fail_count}\n"
-        f"• Всего пользователей: {len(all_users)}"
+        f"• Всего пользователей бота: {len(all_bot_users)}"
     )
     
     await query.edit_message_text(report_text, reply_markup=get_main_menu(user_id))
@@ -498,7 +513,7 @@ async def execute_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def send_instant_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Мгновенная отправка напоминания о конкретном мероприятии (только для админов)"""
+    """Мгновенная отправка напоминания о конкретном мероприятии всем пользователям бота"""
     user_id = update.effective_user.id
     
     if not is_admin(user_id):
@@ -522,15 +537,7 @@ async def send_instant_reminder(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     event = events[event_num - 1]
-    event_id = event[0]
     
-    # Получаем всех пользователей
-    all_users = get_all_users()
-    
-    if not all_users:
-        await update.message.reply_text("❌ Нет пользователей для рассылки.")
-        return
-
     dt = datetime.fromisoformat(event[1])
     dt_moscow = convert_to_moscow_time(dt)
     loc = event[2] or "не указано"
@@ -538,20 +545,29 @@ async def send_instant_reminder(update: Update, context: ContextTypes.DEFAULT_TY
 
     # Формируем сообщение
     message = (
-        "🔔 Срочное напоминание!\n\n"
+        "🔔 Срочное напоминание от администратора!\n\n"
         f"📅 {dt_moscow.strftime('%d.%m.%Y в %H:%M')}\n"
         f"📍 {loc}\n"
         f"💃 {dances}\n\n"
         "Успейте подготовиться! 🕺💃"
     )
 
-    # Отправляем сообщение всем пользователям
+    # Получаем ВСЕХ пользователей бота (кто хоть раз нажимал /start)
+    all_bot_users = get_all_bot_users()
+    
+    if not all_bot_users:
+        await update.message.reply_text("❌ Нет пользователей для рассылки.")
+        return
+
+    # Отправляем сообщение всем пользователям бота
     success_count = 0
     fail_count = 0
     
-    progress_msg = await update.message.reply_text("🔄 Начинаю рассылку...")
+    progress_msg = await update.message.reply_text(
+        f"🔄 Начинаю рассылку для {len(all_bot_users)} пользователей..."
+    )
 
-    for user in all_users:
+    for user in all_bot_users:
         try:
             await context.bot.send_message(chat_id=user, text=message)
             success_count += 1
@@ -567,7 +583,7 @@ async def send_instant_reminder(update: Update, context: ContextTypes.DEFAULT_TY
         f"📊 Статистика:\n"
         f"• Успешно отправлено: {success_count}\n"
         f"• Не удалось отправить: {fail_count}\n"
-        f"• Всего пользователей: {len(all_users)}"
+        f"• Всего пользователей бота: {len(all_bot_users)}"
     )
     
     await progress_msg.edit_text(report_text)
@@ -832,6 +848,10 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
+        total_events = 0
+        users_with_events = 0
+        upcoming_events = 0
+        
         from database import get_connection
         conn = get_connection()
         cursor = conn.cursor()
@@ -843,7 +863,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             total_events = cursor.fetchone()[0]
 
             cursor.execute("SELECT COUNT(DISTINCT user_id) FROM events")
-            total_users = cursor.fetchone()[0]
+            users_with_events = cursor.fetchone()[0]
 
             cursor.execute("SELECT COUNT(*) FROM events WHERE event_datetime >= %s",
                            (datetime.now(),))
@@ -854,7 +874,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             total_events = cursor.fetchone()[0]
 
             cursor.execute("SELECT COUNT(DISTINCT user_id) FROM events")
-            total_users = cursor.fetchone()[0]
+            users_with_events = cursor.fetchone()[0]
 
             cursor.execute("SELECT COUNT(*) FROM events WHERE event_datetime >= ?",
                            (datetime.now().isoformat(),))
@@ -862,12 +882,17 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         conn.close()
 
+        # Статистика пользователей бота
+        total_bot_users, active_bot_users = get_bot_users_stats()
+
         db_type = "PostgreSQL" if os.getenv('RENDER') else "SQLite"
         stats_msg = (
             "📊 Статистика бота:\n\n"
             f"• Всего событий: {total_events}\n"
             f"• Предстоящих событий: {upcoming_events}\n"
-            f"• Уникальных пользователей: {total_users}\n"
+            f"• Пользователей с событиями: {users_with_events}\n"
+            f"• Всего пользователей бота: {total_bot_users}\n"
+            f"• Активных пользователей (30 дней): {active_bot_users}\n"
             f"• Админов: {len(ADMIN_IDS)}\n"
             f"• База данных: {db_type}\n"
             f"• Часовой пояс: Москва (UTC+3)\n"
@@ -1002,6 +1027,7 @@ def main():
     print("✅ Бот запущен!")
     print(f"👑 Админы: {ADMIN_IDS}")
     print("📢 Функция рассылки активирована")
+    print("👥 Рассылка работает для всех пользователей бота")
 
     # Для Render - используем webhook
     if os.getenv('RENDER'):
