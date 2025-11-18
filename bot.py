@@ -77,8 +77,6 @@ def get_main_menu(user_id=None):
             [InlineKeyboardButton("📅 Мои мероприятия", callback_data="show_events")],
             [InlineKeyboardButton("🗑️ Удалить событие", callback_data="delete_event")],
             [InlineKeyboardButton("🎯 Сегодня есть мероприятие?", callback_data="today")],
-            [InlineKeyboardButton("🔧 Отладка", callback_data="debug")],
-            [InlineKeyboardButton("📊 Статистика", callback_data="stats")],
             [InlineKeyboardButton("💾 Резервная копия", callback_data="backup")]
         ]
     else:
@@ -694,3 +692,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
