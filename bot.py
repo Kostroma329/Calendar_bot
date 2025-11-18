@@ -637,7 +637,7 @@ def main():
     init_db()
     
     # 3. Создаем начальную резервную копию (если база не пустая)
-     try:
+    try:
         conn = sqlite3.connect("events.db", check_same_thread=False)
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM events")
@@ -730,4 +730,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
