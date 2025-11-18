@@ -598,19 +598,24 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
-    # Инициализация базы данных
+    # 1. Сначала пытаемся восстановить данные из резервной копии
+    print("🔄 Проверка и восстановление из резервной копии...")
+    restore_success = restore_events()
+    
+    if restore_success:
+        print("✅ Данные восстановлены из резервной копии")
+    else:
+        print("ℹ️  Резервной копии нет или ошибка восстановления")
+    
+    # 2. Затем инициализируем базу данных (создаст таблицы если их нет)
     init_db()
     
-    # Автоматическое восстановление из резервной копии при старте
-    print("🔄 Проверка резервной копии...")
-    backup_info = get_backup_info()
-    print(f"📁 {backup_info}")
-    
-    # Создаем резервную копию при старте
-    print("💾 Создание резервной копии при запуске...")
+    # 3. Создаем резервную копию текущего состояния
+    print("💾 Создание резервной копии...")
     backup_success = backup_events()
     if backup_success:
-        print("✅ Резервная копия создана")
+        backup_info = get_backup_info()
+        print(f"✅ {backup_info}")
     else:
         print("⚠️  Не удалось создать резервную копию")
 
@@ -692,4 +697,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
