@@ -619,20 +619,10 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
-    # Регистрируем обработчики завершения (оставляем на всякий случай)
-    atexit.register(backup_on_exit)
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-    
-    # 1. Сначала пытаемся восстановить данные
-    print("🔄 Восстановление из резервной копии...")
-    restore_events()
-    
-    # 2. Инициализируем базу
+    # Просто инициализируем базу
     init_db()
     
-    # 3. Периодический бэкап остается для подстраховки
-    print("💾 Система автоматического резервного копирования активирована")
+    print("✅ База данных инициализирована")
 
     # Создаем Application с JobQueue
     application = Application.builder().token(BOT_TOKEN).build()
@@ -714,6 +704,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
