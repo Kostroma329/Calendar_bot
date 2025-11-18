@@ -8,6 +8,14 @@ import logging
 # Настройка логирования
 logger = logging.getLogger(__name__)
 
+def get_moscow_time():
+    """Получение текущего времени в Московском часовом поясе (UTC+3)"""
+    return datetime.now() + timedelta(hours=3)
+
+def adjust_timezone(dt):
+    """Добавляет 3 часа к времени для Московского часового пояса"""
+    return dt + timedelta(hours=3)
+
 # ТОЛЬКО ваши танцы
 DANCE_VARIANTS = {
     "Барыня": {"барыня", "барыню"},
@@ -23,6 +31,7 @@ DANCE_VARIANTS = {
     "Снегири": {"снегири", "снегирей"},
     "Россияночка": {"россияночка", "россияночку"},
     "Субботея": {"субботея", "субботею"},
+    "Зимние мотивы":{"Зимние мотивы"},
     "Ярмарочная круговерть": {"ярмарочная круговерть", "ярмарочной круговерти"},
     "Вальс": {"вальс", "вальсик"},
     "Белый вальс": {"белый вальс", "белого вальса"},
@@ -114,7 +123,7 @@ class DateTimeExtractor:
             month_name = match.group(2)
             month = months[month_name]
 
-            now = datetime.now()
+            now = get_moscow_time()  # Используем Московское время
             year = now.year
 
             # Если месяц уже прошел в этом году, берем следующий год
@@ -133,7 +142,7 @@ class DateTimeExtractor:
     def extract_relative_date(text: str) -> Optional[datetime]:
         """Извлекает относительные даты типа 'завтра', 'в субботу'"""
         text_lower = text.lower()
-        now = datetime.now()
+        now = get_moscow_time()  # Используем Московское время
 
         for keyword, days_offset in RELATIVE_DATE_KEYWORDS.items():
             if keyword in text_lower:
@@ -171,7 +180,7 @@ class DateTimeExtractor:
                         time_str += ':00'
 
                     time_obj = datetime.strptime(time_str, "%H:%M").time()
-                    return datetime.combine(datetime.now().date(), time_obj)
+                    return datetime.combine(get_moscow_time().date(), time_obj)
                 except ValueError as e:
                     logger.debug(f"Ошибка парсинга времени '{time_str}': {e}")
                     continue
@@ -194,7 +203,7 @@ class DateTimeExtractor:
                 return date_part
         else:
             # Если есть только время, используем сегодня/завтра
-            now = datetime.now()
+            now = get_moscow_time()  # Используем Московское время
             if time_part.time() > now.time():
                 return datetime.combine(now.date(), time_part.time())
             else:
@@ -223,12 +232,12 @@ def extract_datetime(text: str) -> Optional[datetime]:
         if not result:
             try:
                 result = dateutil_parse(text, fuzzy=True, dayfirst=True)
-                if result and result <= datetime.now():
+                if result and result <= get_moscow_time():
                     result += timedelta(days=1)
             except Exception:
                 pass
 
-        return result if result and result > datetime.now() else None
+        return result if result and result > get_moscow_time() else None
 
     except Exception as e:
         logger.error(f"Error extracting datetime from '{text}': {e}")
