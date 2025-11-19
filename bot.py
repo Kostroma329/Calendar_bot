@@ -129,6 +129,9 @@ def get_main_menu(user_id=None):
     if user_id and is_admin(user_id):
         keyboard.extend([
             [InlineKeyboardButton("📢 Рассылка напоминаний", callback_data="broadcast")],
+            [InlineKeyboardButton("🗑️ Удалить событие", callback_data="delete_event")],
+            [InlineKeyboardButton("🔧 Отладка", callback_data="debug")],
+            [InlineKeyboardButton("📊 Статистика", callback_data="stats")]
         ])
     
     return InlineKeyboardMarkup(keyboard)
@@ -371,7 +374,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return ConversationHandler.END
 
-        # Обработка выбора конкретного события для рассылки
         elif query.data.startswith("broadcast_"):
             # Только для админов
             if not is_admin(user_id):
@@ -415,7 +417,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(confirmation_text, reply_markup=reply_markup)
             return ConversationHandler.END
 
-        # Подтверждение рассылки
         elif query.data == "confirm_broadcast":
             # Только для админов
             if not is_admin(user_id):
@@ -486,7 +487,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop("broadcast_event_id", None)
             return ConversationHandler.END
 
-        # Обработка отмены рассылки
         elif query.data == "cancel_broadcast":
             await query.edit_message_text("❌ Рассылка отменена.", reply_markup=get_main_menu(user_id))
             # Очищаем временные данные
@@ -566,7 +566,7 @@ async def send_instant_reminder(update: Update, context: ContextTypes.DEFAULT_TY
             logger.error(f"Не удалось отправить сообщение пользователю {user}: {e}")
             fail_count += 1
 
-    # Отчет о рассылке
+    # Отчет о рассылки
     report_text = (
         f"✅ Рассылка завершена!\n\n"
         f"📊 Статистика:\n"
@@ -576,329 +576,6 @@ async def send_instant_reminder(update: Update, context: ContextTypes.DEFAULT_TY
     )
     
     await progress_msg.edit_text(report_text)
-
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    user_id = update.effective_user.id
-
-    # Используем парсер
-    extracted = extract_with_spacy(text)
-    dt = extracted["datetime"]
-    location = extracted["location"]
-    dances = extracted["dances"]
-
-    if not dt:
-        await update.message.reply_text("❌ Не удалось определить дату. Попробуй: *«завтра в 19:00»*",
-                                        parse_mode="Markdown")
-        return ConversationHandler.END
-
-    # Проверяем, нет ли уже такого события
-    if event_exists(user_id, dt, location, dances):
-        dances_str = ", ".join(dances) if dances else "не указаны"
-        existing_event_msg = (
-            "❌ Такое событие уже существует!\n\n"
-            f"📅 {dt.strftime('%d.%m.%Y %H:%M')}\n"
-            f"📍 {location or 'не указано'}\n"
-            f"💃 {dances_str}\n\n"
-            "Измени дату, место или танцы и попробуй снова."
-        )
-        await update.message.reply_text(existing_event_msg, reply_markup=get_main_menu(user_id))
-        return ConversationHandler.END
-
-    # Сохраняем в context.user_data
-    context.user_data["event_data"] = {
-        "datetime": dt,
-        "location": location,
-        "dances": dances,
-        "raw_text": text
-    }
-
-    # Кнопки подтверждения
-    keyboard = [
-        [
-            InlineKeyboardButton("✅ Всё верно", callback_data="confirm"),
-        ],
-        [
-            InlineKeyboardButton("✏️ Место", callback_data="edit_location"),
-            InlineKeyboardButton("💃 Танцы", callback_data="edit_dances")
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    dances_str = ", ".join(dances) if dances else "не распознаны"
-    await update.message.reply_text(
-        f"Проверь данные:\n\n"
-        f"📅 {dt.strftime('%d.%m.%Y %H:%M')}\n"
-        f"📍 {location or 'не указано'}\n"
-        f"💃 {dances_str}\n\n"
-        f"Всё правильно?",
-        reply_markup=reply_markup
-    )
-    return AWAITING_CONFIRMATION
-
-
-async def confirm_or_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = update.effective_user.id
-
-    if "event_data" not in context.user_data:
-        await query.edit_message_text("❌ Ошибка. Начни сначала.", reply_markup=get_main_menu(user_id))
-        return ConversationHandler.END
-
-    data = context.user_data["event_data"]
-
-    if query.data == "confirm":
-        # Двойная проверка перед сохранением
-        if event_exists(user_id, data["datetime"], data["location"], data["dances"]):
-            dances_str = ", ".join(data["dances"]) if data["dances"] else "не указаны"
-            existing_event_msg = (
-                "❌ Пока ты подтверждал, такое событие уже было создано!\n\n"
-                f"📅 {data['datetime'].strftime('%d.%m.%Y %H:%M')}\n"
-                f"📍 {data['location'] or 'не указано'}\n"
-                f"💃 {dances_str}\n\n"
-                "Проверь свои события или измени данные."
-            )
-            await query.edit_message_text(existing_event_msg, reply_markup=get_main_menu(user_id))
-            context.user_data.pop("event_data", None)
-            return ConversationHandler.END
-
-        success = add_event(user_id, data["datetime"], data["location"], data["dances"], data["raw_text"])
-        if success:
-            db_type = "PostgreSQL" if os.getenv('RENDER') else "SQLite"
-            message = f"✅ Отлично! Событие сохранено в календаре ({db_type})."
-            await query.edit_message_text(message, reply_markup=get_main_menu(user_id))
-        else:
-            await query.edit_message_text("❌ Ошибка при сохранении события.", reply_markup=get_main_menu(user_id))
-        # Очищаем временные данные
-        context.user_data.pop("event_data", None)
-        return ConversationHandler.END
-
-    elif query.data == "edit_location":
-        await query.edit_message_text("Напиши правильное место проведения:")
-        return AWAITING_LOCATION
-
-    elif query.data == "edit_dances":
-        await query.edit_message_text("Напиши правильные танцы через запятую:")
-        return AWAITING_DANCES
-
-
-async def receive_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if "event_data" not in context.user_data:
-        await update.message.reply_text("❌ Ошибка. Начни с команды /start.", reply_markup=get_main_menu(user_id))
-        return ConversationHandler.END
-
-    new_location = update.message.text.strip()
-
-    # Обновляем данные в context.user_data
-    context.user_data["event_data"]["location"] = new_location
-
-    # Показываем обновленные данные для подтверждения
-    data = context.user_data["event_data"]
-
-    keyboard = [
-        [
-            InlineKeyboardButton("✅ Всё верно", callback_data="confirm"),
-        ],
-        [
-            InlineKeyboardButton("✏️ Место", callback_data="edit_location"),
-            InlineKeyboardButton("💃 Танцы", callback_data="edit_dances")
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    dances_str = ", ".join(data["dances"]) if data["dances"] else "не указаны"
-    await update.message.reply_text(
-        f"✅ Место обновлено!\n\n"
-        f"Обновленные данные:\n"
-        f"📅 {data['datetime'].strftime('%d.%m.%Y %H:%M')}\n"
-        f"📍 {new_location or 'не указано'}\n"
-        f"💃 {dances_str}\n\n"
-        f"Всё правильно?",
-        reply_markup=reply_markup
-    )
-    return AWAITING_CONFIRMATION
-    
-    # Запускаем процесс рассылки
-    events = get_upcoming_events_all()
-    
-    if not events:
-        await query.edit_message_text("❌ Нет мероприятий для рассылки.", 
-                                      reply_markup=get_main_menu(user_id))
-        return ConversationHandler.END
-
-    # Создаем клавиатуру с событиями
-    keyboard = []
-    for i, event in enumerate(events, 1):
-        dt = datetime.fromisoformat(event[1])
-        dt_moscow = convert_to_moscow_time(dt)
-        loc = event[2] or "не указано"
-        dances = event[3] or "не указаны"
-        
-        button_text = f"{i}. {dt_moscow.strftime('%d.%m %H:%M')} - {loc}"
-        if len(button_text) > 40:
-            button_text = button_text[:37] + "..."
-        
-        keyboard.append([InlineKeyboardButton(button_text, callback_data=f"broadcast_{event[0]}")])
-    
-    keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel_broadcast")])
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(
-        "📢 Выберите мероприятие для рассылки напоминания всем пользователям:",
-        reply_markup=reply_markup
-    )
-    return ConversationHandler.END
-
-# Обработка выбора конкретного события для рассылки
-elif query.data.startswith("broadcast_"):
-    # Только для админов
-    if not is_admin(user_id):
-        await query.edit_message_text("❌ У вас нет прав для рассылки.", 
-                                      reply_markup=get_main_menu(user_id))
-        return ConversationHandler.END
-
-    event_id = int(query.data.split("_")[1])
-    
-    # Получаем информацию о событии
-    event = get_event_by_id(event_id)
-    if not event:
-        await query.edit_message_text("❌ Событие не найдено.", reply_markup=get_main_menu(user_id))
-        return ConversationHandler.END
-
-    # Сохраняем event_id в context для использования в следующем шаге
-    context.user_data["broadcast_event_id"] = event_id
-    
-    # Показываем подтверждение
-    dt = datetime.fromisoformat(event[1])
-    dt_moscow = convert_to_moscow_time(dt)
-    loc = event[2] or "не указано"
-    dances = event[3] or "не указаны"
-    
-    confirmation_text = (
-        "📢 Подтвердите рассылку:\n\n"
-        f"📅 {dt_moscow.strftime('%d.%m.%Y в %H:%M')}\n"
-        f"📍 {loc}\n"
-        f"💃 {dances}\n\n"
-        "Отправить напоминание ВСЕМ пользователям бота?"
-    )
-    
-    keyboard = [
-        [
-            InlineKeyboardButton("✅ Да, отправить всем", callback_data="confirm_broadcast"),
-            InlineKeyboardButton("❌ Отмена", callback_data="cancel_broadcast")
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(confirmation_text, reply_markup=reply_markup)
-    return ConversationHandler.END
-
-# Подтверждение рассылки
-elif query.data == "confirm_broadcast":
-    # Только для админов
-    if not is_admin(user_id):
-        await query.edit_message_text("❌ У вас нет прав для рассылки.", 
-                                      reply_markup=get_main_menu(user_id))
-        return ConversationHandler.END
-
-    event_id = context.user_data.get("broadcast_event_id")
-    if not event_id:
-        await query.edit_message_text("❌ Ошибка: событие не найдено.", reply_markup=get_main_menu(user_id))
-        return ConversationHandler.END
-
-    # Получаем информацию о событии
-    event = get_event_by_id(event_id)
-    if not event:
-        await query.edit_message_text("❌ Событие не найдено.", reply_markup=get_main_menu(user_id))
-        return ConversationHandler.END
-
-    # Получаем ВСЕХ пользователей бота
-    all_bot_users = get_all_bot_users()
-    
-    if not all_bot_users:
-        await query.edit_message_text("❌ Нет пользователей для рассылки.", reply_markup=get_main_menu(user_id))
-        return ConversationHandler.END
-
-    dt = datetime.fromisoformat(event[1])
-    dt_moscow = convert_to_moscow_time(dt)
-    loc = event[2] or "не указано"
-    dances = event[3] or "не указаны"
-
-    # Формируем сообщение
-    message = (
-        "🔔 Напоминание от администратора!\n\n"
-        f"📅 {dt_moscow.strftime('%d.%m.%Y в %H:%M')}\n"
-        f"📍 {loc}\n"
-        f"💃 {dances}\n\n"
-        "Не забудьте подготовиться! 🕺💃"
-    )
-
-    # Отправляем сообщение всем пользователям бота
-    success_count = 0
-    fail_count = 0
-    
-    await query.edit_message_text(f"🔄 Начинаю рассылку для {len(all_bot_users)} пользователей...")
-    
-    for user in all_bot_users:
-        try:
-            await context.bot.send_message(chat_id=user, text=message)
-            success_count += 1
-            # Небольшая задержка чтобы не превысить лимиты Telegram
-            await asyncio.sleep(0.1)
-        except Exception as e:
-            logger.error(f"Не удалось отправить сообщение пользователю {user}: {e}")
-            fail_count += 1
-
-    # Отчет о рассылке
-    report_text = (
-        f"✅ Рассылка завершена!\n\n"
-        f"📊 Статистика:\n"
-        f"• Успешно отправлено: {success_count}\n"
-        f"• Не удалось отправить: {fail_count}\n"
-        f"• Всего пользователей бота: {len(all_bot_users)}"
-    )
-    
-    await query.edit_message_text(report_text, reply_markup=get_main_menu(user_id))
-    
-    # Очищаем временные данные
-    context.user_data.pop("broadcast_event_id", None)
-    return ConversationHandler.END
-
-# Обработка отмены рассылки
-elif query.data == "cancel_broadcast":
-    await query.edit_message_text("❌ Рассылка отменена.", reply_markup=get_main_menu(user_id))
-    # Очищаем временные данные
-    context.user_data.pop("broadcast_event_id", None)
-    return ConversationHandler.END
-
-async def send_instant_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Мгновенная отправка напоминания о конкретном мероприятии всем пользователям бота"""
-    user_id = update.effective_user.id
-    
-    if not is_admin(user_id):
-        await update.message.reply_text("❌ У вас нет прав для этой команды.")
-        return
-
-    args = context.args
-    if not args or not args[0].isdigit():
-        await update.message.reply_text(
-            "❌ Используйте: /remind N\n"
-            "где N - номер события из списка (/debug или кнопка 'Все мероприятия')\n\n"
-            "Пример: /remind 1"
-        )
-        return
-
-    event_num = int(args[0])
-    events = get_upcoming_events_all()
-
-    if event_num < 1 or event_num > len(events):
-        await update.message.reply_text(f"❌ Нет события с номером {event_num}.")
-        return
-
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1354,6 +1031,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
